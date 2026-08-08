@@ -21,6 +21,7 @@ let currentAudio = null;
 let audioCtx = null;
 let analyser = null;
 let audioLevelData = null;
+let audioUnlocked = false;
 
 function ensureAudioContext() {
     if (audioCtx) return;
@@ -34,6 +35,22 @@ function ensureAudioContext() {
     } catch (e) { /* non-fatal */ }
 }
 
+// iOS spielt programmatisch gestartetes Audio (z.B. Jarvis' Antwort NACH
+// einem WebSocket-Rundlauf) nur ab, wenn IRGENDWANN vorher schon einmal ein
+// Audio-Element direkt innerhalb einer echten Beruehrung/eines Klicks
+// gestartet wurde ("entsperrt", gilt danach fuer die ganze Seite) — sonst
+// bleibt es stumm, ohne Fehler. Gleicher Trick wie main.js (Mac).
+function unlockAudio() {
+    ensureAudioContext();
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    if (!audioUnlocked) {
+        const silent = new Audio('data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAYZNIGPkAAAAAAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAYZNIGPkAAAAAAAAAAAAAAAAAAAA');
+        silent.play().then(() => { audioUnlocked = true; }).catch(() => {});
+    }
+}
+document.addEventListener('touchstart', unlockAudio, { once: false });
+document.addEventListener('click', unlockAudio, { once: false });
+
 function getAudioLevel() {
     if (!analyser || !audioLevelData) return 0;
     analyser.getByteFrequencyData(audioLevelData);
@@ -41,9 +58,6 @@ function getAudioLevel() {
     for (let i = 0; i < audioLevelData.length; i++) sum += audioLevelData[i];
     return Math.min(1, (sum / audioLevelData.length) / 110);
 }
-
-document.addEventListener('touchstart', ensureAudioContext, { once: true });
-document.addEventListener('click', ensureAudioContext, { once: true });
 
 // ---------------------------------------------------------------------------
 // Orb renderer — identisch zu main.js (reiner Canvas-Code, keine Kopplung an
