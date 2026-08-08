@@ -16,10 +16,11 @@
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG="$DIR/config.json"
 
-# Tailscale-IP des Hetzner-Servers (jarvis-brain). Feste IP statt MagicDNS-
-# Name verwendet, damit es nicht davon abhaengt ob MagicDNS im Tailnet
-# aktiviert ist.
-JARVIS_HOST="100.116.28.82:8340"
+# Echtes HTTPS ueber Tailscale (tailscale serve, siehe UEBERGABE.md) statt
+# der nackten http://IP:8340 — Chrome/Safari behandeln eine rohe IP+http
+# als unsicheren Origin und blockieren dann Mikrofon/Kamera/Benachrich-
+# tigungen automatisch, WSS ueber den echten Tailscale-Hostnamen umgeht das.
+JARVIS_HOST="jarvis-brain.tailef7101.ts.net"
 
 get_json() {
   python3 -c "import json,sys;print(json.load(open('$CONFIG')).get('$1', ''))"
@@ -44,7 +45,7 @@ open_config_apps &
 # Kurzer Check ob der Hetzner-Server (ueber Tailscale) gerade erreichbar ist —
 # reiner Hinweis, kein Warten/Blockieren mehr noetig, der Server laeuft
 # ohnehin 24/7 unabhaengig von diesem Skript.
-if ! curl -s -o /dev/null -m 3 "http://$JARVIS_HOST/"; then
+if ! curl -s -o /dev/null -m 3 "https://$JARVIS_HOST/"; then
   echo "[jarvis] WARNUNG: Hetzner-Server ($JARVIS_HOST) antwortet gerade nicht. Tailscale-Verbindung pruefen."
 fi
 
@@ -84,7 +85,7 @@ tell application \"Google Chrome\"
     if foundWindow is missing value then
         set jarvisWindow to make new window
         tell jarvisWindow
-            set URL of active tab to \"http://$JARVIS_HOST\"
+            set URL of active tab to \"https://$JARVIS_HOST\"
             repeat with tabURL in $EXTRA_TABS_APPLESCRIPT
                 make new tab at end of tabs with properties {URL:tabURL}
             end repeat

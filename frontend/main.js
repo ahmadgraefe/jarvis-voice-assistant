@@ -304,7 +304,11 @@ let hasGreeted = false; // only auto-greet on the TRUE first connection — a
 // sleep/wake) must NOT silently re-trigger a full unprompted greeting.
 
 function connect() {
-    ws = new WebSocket(`ws://${location.host}/ws`);
+    // wss:// wenn die Seite selbst ueber https laeuft (Hetzner-Server via
+    // tailscale serve), sonst ws:// — sonst blockt der Browser das als
+    // Mixed Content auf einer https-Seite.
+    const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${wsProtocol}//${location.host}/ws`);
     ws.onopen = () => {
         console.log('[jarvis] WebSocket connected');
         if (!hasGreeted) {
