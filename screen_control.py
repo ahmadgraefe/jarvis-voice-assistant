@@ -20,7 +20,14 @@ import os
 import re
 import time
 
-import pyautogui
+try:
+    # Nicht installiert auf dem Server, siehe whatsapp_tools.py fuer die
+    # gleiche Begruendung — alle Funktionen hier werden dort per
+    # mac_actuator_client ersetzt, der echte Import muss nur auf dem Mac
+    # klappen.
+    import pyautogui
+except ImportError:
+    pyautogui = None
 from PIL import ImageGrab
 
 LOG_PATH = os.path.expanduser("~/Library/Logs/jarvis-screen-control.log")
@@ -28,8 +35,9 @@ LOG_PATH = os.path.expanduser("~/Library/Logs/jarvis-screen-control.log")
 # Never move faster than this, never move instantly across the whole screen —
 # small, real, deliberate — and a hard top-left "abort corner" pyautogui
 # itself enforces (FAILSAFE) by throwing if the mouse is yanked to (0,0).
-pyautogui.FAILSAFE = True
-pyautogui.PAUSE = 0.05
+if pyautogui:
+    pyautogui.FAILSAFE = True
+    pyautogui.PAUSE = 0.05
 
 
 def _log(msg: str):
@@ -130,3 +138,8 @@ async def click_on(description: str, anthropic_client, action: str = "click") ->
     if action == "move":
         return move_mouse(logical_x, logical_y) + f" (Ziel: {description})"
     return click(logical_x, logical_y) + f" (Ziel: {description})"
+
+
+# Server-Migration (Hetzner): siehe app_control.py, gleiches Prinzip.
+if os.environ.get("JARVIS_ROLE") == "server":
+    from mac_actuator_client import click_on, type_text  # noqa: E402,F811

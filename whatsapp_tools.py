@@ -8,9 +8,17 @@ chat list for unread messages.
 import asyncio
 import base64
 import io
+import os
 import re
 
-import pyautogui
+try:
+    # Nicht installiert auf dem Server (requirements-server.txt laesst es
+    # bewusst weg, siehe unten) — dort werden alle Funktionen dieses Moduls
+    # ohnehin durch mac_actuator_client ersetzt, der Import muss nur auf dem
+    # Mac selbst klappen (wo mac_actuator.py dieses Modul echt nutzt).
+    import pyautogui
+except ImportError:
+    pyautogui = None
 from PIL import Image, ImageGrab
 
 
@@ -279,3 +287,10 @@ async def check_new_messages(anthropic_client) -> str:
         return response.content[0].text
     except Exception as e:
         return f"ERROR: WhatsApp konnte nicht geprueft werden: {e}"
+
+
+# Server-Migration (Hetzner): siehe app_control.py, gleiches Prinzip.
+if os.environ.get("JARVIS_ROLE") == "server":
+    from mac_actuator_client import (  # noqa: E402,F811
+        check_new_messages, open_chat_and_screenshot, summarize_chat, capture_self_chat_history,
+    )

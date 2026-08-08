@@ -247,3 +247,12 @@ async def send_whatsapp(recipient: str, message: str) -> str:
         return f"Nachricht an {recipient} gesendet."
     except Exception as e:
         return f"ERROR: WhatsApp-Nachricht fehlgeschlagen: {e}"
+
+
+# Server-Migration (Hetzner): auf dem Server (JARVIS_ROLE=server) werden die
+# obigen, Mac-lokalen Implementierungen durch HTTP-Aufrufe an mac_actuator.py
+# ersetzt. Die echten Funktionen oben bleiben unveraendert und laufen normal
+# weiter, wenn dieses Modul auf dem Mac selbst importiert wird (z.B. von
+# mac_actuator.py, das genau diese Funktionen lokal aufruft).
+if os.environ.get("JARVIS_ROLE") == "server":
+    from mac_actuator_client import open_app, send_whatsapp, resolve_contact_phone, last_contacts_error  # noqa: E402,F811
