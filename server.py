@@ -12,6 +12,8 @@ import os
 import re
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import anthropic
 import httpx
@@ -257,9 +259,12 @@ def build_dynamic_block(query: str = "") -> str:
     bewusst HIER rein statt in build_semi_stable_block: seine Relevanz haengt
     an der aktuellen Frage (query), kann also strukturell nicht stundenlang
     gecacht werden wie die anderen Bloecke dort."""
-    now = time.localtime()
-    weekday_de = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"][now.tm_wday]
-    time_block = f"\nJetzt: {weekday_de}, {time.strftime('%d.%m.%Y', now)}, {time.strftime('%H:%M', now)} Uhr"
+    # Ahmads eigene Zeitzone (Europe/Berlin) fest verwenden statt der
+    # Server-Systemzeit (server.localtime() ist auf dem Hetzner-Server UTC,
+    # nicht CEST/CET — sonst denkt das Modell es waere 2 Stunden frueher).
+    now = datetime.now(ZoneInfo("Europe/Berlin"))
+    weekday_de = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"][now.weekday()]
+    time_block = f"\nJetzt: {weekday_de}, {now.strftime('%d.%m.%Y')}, {now.strftime('%H:%M')} Uhr (Ahmads Zeitzone Europe/Berlin)"
 
     weather_block = ""
     if WEATHER_INFO:
