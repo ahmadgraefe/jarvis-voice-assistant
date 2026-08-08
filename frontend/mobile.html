@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+    <title>J.A.R.V.I.S.</title>
+    <link rel="manifest" href="/static/manifest.json">
+    <link rel="apple-touch-icon" href="/static/icon-192.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#0f0c0a">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/mobile.css">
+</head>
+<body>
+    <div id="app">
+        <canvas id="orb-canvas"></canvas>
+        <div id="status"></div>
+    </div>
+    <div id="mobile-controls">
+        <div id="mobile-log"></div>
+        <div id="mobile-input-row">
+            <input id="mobile-text" type="text" placeholder="Nachricht an Jarvis..." autocomplete="off">
+            <button id="mobile-send" aria-label="Senden">➤</button>
+        </div>
+        <button id="mobile-talk" aria-label="Halten zum Sprechen">🎤 Halten zum Sprechen</button>
+        <button id="mobile-enable-push" aria-label="Benachrichtigungen aktivieren">🔔 Benachrichtigungen aktivieren</button>
+    </div>
+    <script src="/static/mobile.js"></script>
+</body>
+</html>

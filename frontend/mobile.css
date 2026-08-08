@@ -1,0 +1,113 @@
+/* Jarvis — Mobile-Companion Styles, ergaenzt style.css (Orb-Basis-Styles) */
+
+html, body {
+    overflow: auto;
+    height: 100%;
+}
+
+body {
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;
+}
+
+#app {
+    width: 100vw;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+#orb-canvas, #app {
+    height: 100%;
+    width: 100vw;
+}
+
+#status {
+    bottom: 4vh;
+}
+
+#mobile-controls {
+    flex: 0 0 auto;
+    width: 100%;
+    padding: 10px 14px calc(14px + env(safe-area-inset-bottom));
+    background: linear-gradient(180deg, rgba(3,2,1,0) 0%, #030201 25%);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+#mobile-log {
+    max-height: 22vh;
+    overflow-y: auto;
+    font-size: 13px;
+    color: rgba(255, 210, 160, 0.75);
+    line-height: 1.4;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+#mobile-log .you {
+    color: rgba(255, 255, 255, 0.55);
+}
+
+#mobile-input-row {
+    display: flex;
+    gap: 8px;
+}
+
+#mobile-text {
+    flex: 1;
+    background: rgba(255, 178, 90, 0.08);
+    border: 1px solid rgba(255, 178, 90, 0.25);
+    border-radius: 20px;
+    padding: 10px 16px;
+    color: #fff;
+    font-size: 15px;
+    outline: none;
+}
+
+#mobile-text::placeholder {
+    color: rgba(255, 210, 160, 0.4);
+}
+
+#mobile-send, #mobile-talk, #mobile-enable-push {
+    background: rgba(255, 150, 40, 0.15);
+    border: 1px solid rgba(255, 178, 90, 0.35);
+    border-radius: 20px;
+    color: #ffd6a0;
+    font-size: 14px;
+    padding: 10px 16px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+}
+
+#mobile-send {
+    flex: 0 0 auto;
+    padding: 10px 18px;
+    font-size: 18px;
+    border-radius: 50%;
+}
+
+#mobile-talk {
+    width: 100%;
+    padding: 14px;
+    font-size: 15px;
+}
+
+#mobile-talk.recording {
+    background: rgba(255, 60, 40, 0.25);
+    border-color: rgba(255, 90, 60, 0.6);
+    color: #ffb0a0;
+}
+
+#mobile-enable-push {
+    width: 100%;
+    font-size: 13px;
+    opacity: 0.75;
+}
+
+#mobile-enable-push.granted {
+    display: none;
+}

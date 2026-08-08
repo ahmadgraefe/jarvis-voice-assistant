@@ -33,6 +33,7 @@ import instagram_tools
 import jerome_comm
 import knowledge_graph
 import memory
+import push_notifications
 import research
 import semantic_memory
 import sheets_tools
@@ -225,6 +226,11 @@ async def _alert(config: dict, text: str):
         memory.add_live_event(text)
     except Exception as e:
         _log(f"live_event Warteschlange fehlgeschlagen (ignoriert): {e}")
+
+    try:
+        push_notifications.send_push_to_all("Jarvis", text)
+    except Exception as e:
+        _log(f"Push-Benachrichtigung fehlgeschlagen (ignoriert): {e}")
 
     phone = config.get("alert_phone")
     if not phone:

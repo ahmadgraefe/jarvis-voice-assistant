@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 import anthropic
 import httpx
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
@@ -84,6 +84,7 @@ import calendar_tools
 import content_strategy
 import slt_bio_tools
 import goal_tracker
+import push_notifications
 
 LUNA_VALE_STATUS_PATH = os.path.join(os.path.dirname(__file__), "claude_app_status.md")
 
@@ -2433,6 +2434,80 @@ app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__
 @app.get("/")
 async def serve_index():
     return FileResponse(os.path.join(os.path.dirname(__file__), "frontend", "index.html"))
+
+
+@app.get("/mobile")
+async def serve_mobile():
+    return FileResponse(os.path.join(os.path.dirname(__file__), "frontend", "mobile.html"))
+
+
+@app.post("/transcribe")
+async def transcribe_audio(audio: UploadFile = File(...)):
+    """Roadmap Punkt 17 — Push-to-Talk vom Handy: ElevenLabs Speech-to-Text
+    statt der Web-SpeechRecognition-API (auf iOS Safari nicht zuverlaessig).
+    Gleicher API-Key wie fuer TTS, kein neuer Anbieter noetig."""
+    audio_bytes = await audio.read()
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                "https://api.elevenlabs.io/v1/speech-to-text",
+                headers={"xi-api-key": ELEVENLABS_API_KEY},
+                data={"model_id": "scribe_v1"},
+                files={"file": (audio.filename or "recording.webm", audio_bytes, audio.content_type or "audio/webm")},
+            )
+            r.raise_for_status()
+            data = r.json()
+        return {"text": data.get("text", "")}
+    except Exception as e:
+        print(f"[transcribe] Fehler: {e}", flush=True)
+        return {"text": "", "error": str(e)}
+
+
+@app.get("/push/vapid-public-key")
+async def push_vapid_public_key():
+    return {"key": push_notifications.get_vapid_public_key()}
+
+
+@app.post("/push/subscribe")
+async def push_subscribe(subscription: dict):
+    push_notifications.add_subscription(subscription)
+    return {"ok": True}
+
+
+class _FakeWebSocket:
+    """Minimaler WebSocket-Ersatz fuer /shortcut — process_message() braucht
+    ein ws-artiges Objekt, faengt hier nur den finalen Antworttext ab statt
+    ihn wirklich ueber einen Socket zu senden. Jede unerwartete Methode
+    (z.B. close()) wird als No-Op abgefangen statt einen Fehler zu werfen."""
+    def __init__(self):
+        self.captured_text = []
+
+    async def send_json(self, data):
+        if isinstance(data, dict) and data.get("type") == "response" and data.get("text"):
+            self.captured_text.append(data["text"])
+
+    async def _noop(self, *args, **kwargs):
+        pass
+
+    def __getattr__(self, name):
+        return self._noop
+
+
+@app.post("/shortcut")
+async def shortcut_endpoint(payload: dict):
+    """Roadmap Punkt 17 — Webhook fuer eine iOS-Shortcuts-Automation
+    ("Hey Siri, Jarvis"). Laeuft durch dieselbe process_message()-Pipeline
+    wie WebSocket-Nachrichten (gleiches Gehirn, gleiches Gedaechtnis),
+    liefert nur Text zurueck statt Audio (Shortcuts kann das selbst per
+    Siri vorlesen lassen)."""
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return {"error": "text fehlt"}
+    session_id = "shortcut"
+    conversations.setdefault(session_id, [])
+    fake_ws = _FakeWebSocket()
+    await process_message(session_id, text, fake_ws)
+    return {"text": " ".join(fake_ws.captured_text).strip()}
 
 
 if __name__ == "__main__":
