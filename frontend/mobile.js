@@ -353,18 +353,19 @@ function playNext() {
     const audio = new Audio(url);
     currentAudio = audio;
 
-    try {
-        ensureAudioContext();
-        if (audioCtx) {
-            const src = audioCtx.createMediaElementSource(audio);
-            src.connect(analyser);
-        }
-    } catch (e) { /* non-fatal */ }
-
+    // Bewusst OHNE Web-Audio-Graph (kein createMediaElementSource/Analyser)
+    // — das hier ist die tatsaechliche Sprachausgabe, die MUSS zuverlaessig
+    // hoerbar sein. Ein AudioContext kann auf iOS zwischenzeitlich wieder
+    // 'suspended' werden (z.B. waehrend des Server-Rundlaufs), was play()
+    // trotzdem erfolgreich zurueckmelden wuerde, aber STUMM bliebe — genau
+    // das hat vorhin die stumme Wiedergabe verursacht. Ein einfaches
+    // <audio>-Element spielt direkt ueber die normale Geraete-Ausgabe,
+    // unabhaengig vom AudioContext-Status. Die audio-reaktive Orb-Animation
+    // (Analyser) ist ein optionales Extra, keinen Ton wert.
     audio.onended = () => { URL.revokeObjectURL(url); if (currentAudio === audio) currentAudio = null; playNext(); };
     audio.onerror = () => { URL.revokeObjectURL(url); if (currentAudio === audio) currentAudio = null; playNext(); };
-    audio.play().catch(() => {
-        status.textContent = 'Tippe irgendwo damit Jarvis sprechen kann.';
+    audio.play().catch((err) => {
+        status.textContent = 'Kein Ton (' + (err && err.name ? err.name : 'unbekannt') + '), bitte antippen.';
         document.addEventListener('click', function retry() {
             document.removeEventListener('click', retry);
             audio.play().catch(() => playNext());
