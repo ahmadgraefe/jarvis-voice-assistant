@@ -228,7 +228,7 @@ INSIGHTS-UPDATES PROAKTIV STEUERN: Wenn Ahmad WAEHREND des Gespraechs anfaengt, 
 [ACTION:JEROMEMSG] beschreibung - Fuer JEDE andere freie/laengere Nachricht an Jerome (Tipps geben, etwas erklaeren, eine Ankuendigung, allgemeine Unterstuetzung) — payload ist NUR eine KURZE Beschreibung was gesagt werden soll (z.B. "erklaer ihm dass du jetzt alle 15 Minuten den Chat checkst und gib ihm 2-3 Content-Tipps"), NICHT der fertige Nachrichtentext. Die eigentliche Nachricht wird DANACH in einem separaten Schritt mit vollem Budget komplett fertig geschrieben und dann in einem Rutsch geschickt. WICHTIG: schreib NIEMALS selbst den vollen Nachrichtentext direkt in eine WHATSAPP-Aktion fuer Jerome — deine Live-Antwort ist bewusst kurz gehalten (TTS-Kosten) und eine laengere Nachricht wuerde dabei mitten im Schreiben abgeschnitten und unvollstaendig ankommen (ist bereits live passiert). Nutze fuer Jerome IMMER JEROMEMSG (frei) oder JEROMEBRIEF (Content-Strategie), WHATSAPP nur fuer andere Kontakte oder winzige Ein-Wort-Nachrichten. Sag vorher kurz "Ich schreibe Jerome das jetzt."
 [ACTION:ADDCOMPETITOR] handle - Einen neuen Konkurrenz-Account manuell zur Beobachtung hinzufuegen (handle ohne @). Wird sofort in die Target Creator List im Sheet aufgenommen und ab jetzt bei Recherche/Content-Briefs mit einbezogen. Nutze das wenn Ahmad einen Instagram-Handle nennt und sagt er soll den im Auge behalten/als Konkurrenz tracken.
 
-Bei "Jarvis, lets go" bekommst du Wetter, Aufgaben, Fanplace-Zahlen, neue Mails und den letzten Instagram-Stand bereits vorab zusammengestellt im Nutzertext — fasse ALLES in einem einzigen, natuerlichen Fluss zusammen (Begruessung passend zur Tageszeit + "Master" [vor 12 Uhr "Guten Morgen, Master", 12-18 Uhr "Guten Tag, Master", nach 18 Uhr "Guten Abend, Master"], falls relevant kurz wo ihr stehen geblieben seid, dann Wetter kurz, dann der Reihe nach Fanplace/Mails/Instagram — wie ein durchgaengiges Briefing, nicht als einzelne abgehackte Saetze). WhatsApp wird bewusst NICHT automatisch geprueft (steht Chrome sonst im Weg) — nur wenn Ahmad explizit danach fragt (ACTION:WHATSAPPCHECK). Kein ACTION-Tag noetig, die Daten sind schon da."""
+Bei "Jarvis, lets go" bekommst du die echte aktuelle Uhrzeit/das Datum (siehe AKTUELLE DATEN), Wetter, Aufgaben, Fanplace-Zahlen, neue Mails und den letzten Instagram-Stand bereits vorab zusammengestellt im Nutzertext — fasse ALLES in einem einzigen, natuerlichen Fluss zusammen. Begruesse passend zur ECHTEN Uhrzeit oben (vor ca. 11 Uhr eher morgendlich, 11-18 Uhr tagsueber, 18-23 Uhr abendlich, spaet nachts darf das auch mal humorvoll angemerkt werden — "Sie sind spaet auf, Sir" o.ae.), aber IMMER mit eigenen, wechselnden Worten, nie eine feste Formel die sich Tag fuer Tag wiederholt — das faellt sofort auf und wirkt wie ein Skript statt wie jemand der wirklich da ist. Danach, falls relevant, kurz wo ihr stehen geblieben seid, dann Wetter kurz, dann der Reihe nach Fanplace/Mails/Instagram — wie ein durchgaengiges Briefing, nicht als einzelne abgehackte Saetze. WhatsApp wird bewusst NICHT automatisch geprueft (steht Chrome sonst im Weg) — nur wenn Ahmad explizit danach fragt (ACTION:WHATSAPPCHECK). Kein ACTION-Tag noetig, die Daten sind schon da."""
 
 
 def build_semi_stable_block() -> str:
@@ -257,6 +257,10 @@ def build_dynamic_block(query: str = "") -> str:
     bewusst HIER rein statt in build_semi_stable_block: seine Relevanz haengt
     an der aktuellen Frage (query), kann also strukturell nicht stundenlang
     gecacht werden wie die anderen Bloecke dort."""
+    now = time.localtime()
+    weekday_de = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"][now.tm_wday]
+    time_block = f"\nJetzt: {weekday_de}, {time.strftime('%d.%m.%Y', now)}, {time.strftime('%H:%M', now)} Uhr"
+
     weather_block = ""
     if WEATHER_INFO:
         w = WEATHER_INFO
@@ -281,7 +285,7 @@ def build_dynamic_block(query: str = "") -> str:
     if longterm:
         longterm_block = f"\n\n=== LANGZEITGEDAECHTNIS (relevanteste Eintraege zu deiner aktuellen Frage) ===\n{longterm}\n==="
 
-    return f"=== AKTUELLE DATEN ==={weather_block}{task_block}\n==={history_block}{pending_block}{longterm_block}"
+    return f"=== AKTUELLE DATEN ==={time_block}{weather_block}{task_block}\n==={history_block}{pending_block}{longterm_block}"
 
 
 def build_system_blocks(native: bool = False, query: str = "") -> list:
@@ -1981,14 +1985,19 @@ async def handle_activate(session_id: str, user_text: str, ws: WebSocket):
 
     if memory.has_full_briefing_today():
         prompt = (
-            "Ahmad hat heute bereits das volle Update bekommen (Fanplace/Mails/Instagram) — "
-            "das hier ist ein erneutes \"Jarvis, lets go\" am selben Tag. WICHTIG: sag das auch "
-            "KURZ dazu, statt einfach nur 'was brauchen Sie' zu fragen — sonst wirkt es wie ein "
-            "Systemfehler statt wie eine bewusste Entscheidung (genau das hat heute schon einmal "
-            "zu Verwirrung gefuehrt). Also z.B. sinngemaess: 'Das Update von vorhin steht noch, "
-            "Sir — sagen Sie mir einfach direkt was Sie brauchen (Fanplace, Mails, Instagram, "
-            "Termine...).' Passend zur Tageszeit, ein bis zwei Saetze, nicht mechanisch "
-            "wiederholend." + pending_block
+            "Ahmad hat heute bereits das volle Update bekommen (Fanplace/Mails/Instagram), das "
+            "hier ist ein weiteres \"Jarvis, lets go\" am selben Tag — kein neues volles Briefing "
+            "noetig, aber auch NICHT einfach nur trocken 'was brauchen Sie' fragen, das wirkt wie "
+            "ein Systemfehler statt eine bewusste Entscheidung. Begruesse ihn kurz und ECHT lebendig: "
+            "orientiere dich an der Uhrzeit oben (siehe AKTUELLE DATEN, Morgen/Mittag/Abend/Nacht "
+            "klingen unterschiedlich, spaet nachts darf das auch mal angemerkt werden), passend zu "
+            "deinem Charakter gerne mit einer trockenen, unterspielten Bemerkung — aber nutze NIEMALS "
+            "zweimal hintereinander dieselbe Formulierung oder denselben Satzbau wie im bisherigen "
+            "Gespraechsverlauf oben, das faellt sofort auf und wirkt mechanisch. Mach klar dass er "
+            "direkt sagen kann was er braucht, aber jedes Mal mit anderen Worten. Wenn gerade etwas "
+            "Konkretes ansteht (offene Frage, spaete/fruehe Uhrzeit, laengere Pause seit dem letzten "
+            "Update) darfst du das statt einer generischen Floskel aufgreifen. Ein bis zwei Saetze, "
+            "kein Frage-Antwort-Automatismus." + pending_block
         )
     else:
         results = await asyncio.gather(
