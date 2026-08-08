@@ -13,6 +13,7 @@ ueberhaupt erreichen, kein zusaetzliches Firewall-Regelwerk noetig.
 import base64
 import json
 import os
+import re
 import subprocess
 
 import anthropic
@@ -33,11 +34,16 @@ app = FastAPI()
 
 
 def _tailscale_ip() -> str:
+    # Ueber die Tailscale-CLI abfragen scheitert zuverlaessig, wenn dieser
+    # Prozess von launchd (statt einer interaktiven Sitzung) gestartet wird
+    # ("The Tailscale GUI failed to start", IPC braucht die GUI-Session) —
+    # stattdessen direkt die Netzwerk-Interfaces nach der Tailscale-eigenen
+    # CGNAT-Adresse (100.64.0.0/10) durchsuchen, das ist unabhaengig davon.
     try:
-        out = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=5)
-        ip = out.stdout.strip()
-        if ip:
-            return ip
+        out = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5)
+        match = re.search(r'inet (100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+)', out.stdout)
+        if match:
+            return match.group(1)
     except Exception:
         pass
     return "127.0.0.1"  # Fallback: nur lokal erreichbar, falls Tailscale (noch) nicht laeuft
