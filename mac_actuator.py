@@ -23,6 +23,8 @@ from pydantic import BaseModel
 import app_control
 import whatsapp_tools
 import screen_control
+import claude_code_context
+import claude_code_tool
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 with open(CONFIG_PATH) as f:
@@ -133,6 +135,29 @@ class ScreenTypeReq(BaseModel):
 @app.post("/screen/type")
 def screen_type(req: ScreenTypeReq):
     return {"result": screen_control.type_text(req.text)}
+
+
+class ClaudeCodeContextReq(BaseModel):
+    question: str = ""
+
+
+@app.post("/claude-code/context")
+def claude_code_context_endpoint(req: ClaudeCodeContextReq):
+    # Bewusst SYNCHRON (kein async def) — claude_code_context.get_recent_context
+    # ist selbst sync (reine Datei-I/O), FastAPI fuehrt sync-Handler automatisch
+    # in einem Threadpool aus, blockiert also nicht den Event-Loop.
+    return {"result": claude_code_context.get_recent_context(req.question)}
+
+
+class ClaudeCodeExecReq(BaseModel):
+    task: str
+    timeout: int = 600
+
+
+@app.post("/claude-code/exec")
+async def claude_code_exec_endpoint(req: ClaudeCodeExecReq):
+    result = await claude_code_tool.run_claude_code(req.task, req.timeout)
+    return {"result": result}
 
 
 @app.get("/health")

@@ -70,3 +70,10 @@ async def run_claude_code(task: str, timeout: int = DEFAULT_TIMEOUT) -> str:
 
     _log(f"FERTIG: {output[:200]}")
     return output or "Claude Code hat die Aufgabe ohne Textausgabe abgeschlossen."
+
+
+# Server-Migration (Hetzner): siehe app_control.py, gleiches Prinzip. Die
+# claude-Binary und dieses Projektverzeichnis existieren nur auf dem Mac,
+# darum HTTP-Proxy an mac_actuator.py.
+if os.environ.get("JARVIS_ROLE") == "server":
+    from mac_actuator_client import run_claude_code  # noqa: E402,F811

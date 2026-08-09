@@ -116,3 +116,32 @@ def type_text(text: str) -> str:
             return r.json()["result"]
     except Exception as e:
         return f"ERROR: Mac-Actuator nicht erreichbar ({e})."
+
+
+# --- claude_code_context.py / claude_code_tool.py Ersatz ---
+
+def get_recent_context(question: str) -> str:
+    # Original ist bewusst synchron (server.py ruft es an beiden Aufrufstellen
+    # ohne await auf), darum hier wie type_text ein synchroner httpx-Client.
+    try:
+        with httpx.Client(timeout=_TIMEOUT) as client:
+            r = client.post(f"{MAC_ACTUATOR_URL}/claude-code/context", json={"question": question})
+            r.raise_for_status()
+            return r.json()["result"]
+    except Exception as e:
+        return f"ERROR: Mac-Actuator nicht erreichbar ({e})."
+
+
+async def run_claude_code(task: str, timeout: int = 600) -> str:
+    # Claude-Code-Aufgaben duerfen bis zu 10 Minuten dauern (siehe
+    # claude_code_tool.DEFAULT_TIMEOUT) — eigener, grosszuegigerer Timeout
+    # statt des generischen _TIMEOUT (read=60s), sonst wuerde der HTTP-
+    # Aufruf selbst genau die langen, legitimen Auftraege abwuergen.
+    long_timeout = httpx.Timeout(connect=10.0, read=timeout + 30.0, write=30.0, pool=10.0)
+    try:
+        async with httpx.AsyncClient(timeout=long_timeout) as client:
+            r = await client.post(f"{MAC_ACTUATOR_URL}/claude-code/exec", json={"task": task, "timeout": timeout})
+            r.raise_for_status()
+            return r.json()["result"]
+    except Exception as e:
+        return f"ERROR: Mac-Actuator nicht erreichbar ({e})."
