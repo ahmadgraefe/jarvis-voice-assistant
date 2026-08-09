@@ -21,23 +21,27 @@ let currentAudio = null;
 let audioCtx = null;
 let analyser = null;
 let audioLevelData = null;
-let audioUnlocked = false;
 
-// EIN wiederverwendetes <audio>-Element statt bei jeder Antwort ein neues
-// Audio()-Objekt zu erzeugen. Push-to-Talk braucht deutlich laenger bis zur
-// Antwort als Tippen (Aufnahme + Hochladen + Transkription obendrauf) —
-// WebKits "darf dieses Element gerade programmatisch abspielen"-Erlaubnis
-// kann in der Zwischenzeit ablaufen. Ein play()+pause() SYNCHRON innerhalb
-// jeder echten Beruehrung/jedes Klicks (siehe primeResponseAudio) auf GENAU
-// diesem wiederverwendeten Element macht spaetere asynchrone play()-Aufrufe
-// deutlich zuverlaessiger als bei einem frisch erzeugten Element.
+// EIN wiederverwendetes <audio>-Element fuer die eigentliche Sprachausgabe,
+// nie fuers Primen angefasst (siehe unten warum das wichtig ist).
 const responseAudio = new Audio();
+
+// Separates, IMMER gueltiges stilles Audio-Element NUR zum "Primen" der
+// Abspiel-Erlaubnis. Erster Fix (primen direkt auf responseAudio) hat nur
+// beim ALLERERSTEN Mal zuverlaessig funktioniert: nach der ersten echten
+// Antwort zeigt responseAudio.src auf eine bereits verbrauchte/freigegebene
+// Blob-URL, ein erneutes play() darauf schlaegt aus einem ANDEREN Grund
+// fehl (ungueltige Quelle) und registriert bei iOS offenbar keine gueltige
+// Geste mehr — genau das Muster das Ahmad live gemeldet hat (erste
+// Nachricht Ton, danach stumm). Ein separates Element mit einer festen,
+// immer abspielbaren stillen Audiospur hat dieses Problem nicht.
+const unlockAudioEl = new Audio('data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAYZNIGPkAAAAAAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAYZNIGPkAAAAAAAAAAAAAAAAAAAA');
 
 function primeResponseAudio() {
     try {
-        const p = responseAudio.play();
+        unlockAudioEl.currentTime = 0;
+        const p = unlockAudioEl.play();
         if (p && typeof p.catch === 'function') p.catch(() => {});
-        responseAudio.pause();
     } catch (e) { /* non-fatal */ }
 }
 
@@ -54,20 +58,12 @@ function ensureAudioContext() {
 }
 
 // iOS spielt programmatisch gestartetes Audio (z.B. Jarvis' Antwort NACH
-// einem WebSocket-Rundlauf) nur ab, wenn IRGENDWANN vorher schon einmal ein
-// Audio-Element direkt innerhalb einer echten Beruehrung/eines Klicks
-// gestartet wurde ("entsperrt", gilt danach fuer die ganze Seite) — sonst
-// bleibt es stumm, ohne Fehler. Gleicher Trick wie main.js (Mac).
-function unlockAudio() {
-    ensureAudioContext();
-    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-    if (!audioUnlocked) {
-        const silent = new Audio('data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAYZNIGPkAAAAAAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAYZNIGPkAAAAAAAAAAAAAAAAAAAA');
-        silent.play().then(() => { audioUnlocked = true; }).catch(() => {});
-    }
-}
-document.addEventListener('touchstart', unlockAudio, { once: false });
-document.addEventListener('click', unlockAudio, { once: false });
+// einem WebSocket-Rundlauf) nur zuverlaessig ab, wenn MOEGLICHST KURZ vorher
+// ein Audio-Element innerhalb einer echten Beruehrung/eines Klicks gestartet
+// wurde — darum bei JEDER Beruehrung neu primen (siehe primeResponseAudio),
+// nicht nur einmalig, die Erlaubnis kann zwischendurch wieder ablaufen.
+document.addEventListener('touchstart', primeResponseAudio, { once: false });
+document.addEventListener('click', primeResponseAudio, { once: false });
 
 function getAudioLevel() {
     if (!analyser || !audioLevelData) return 0;
