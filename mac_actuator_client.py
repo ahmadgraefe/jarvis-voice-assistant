@@ -132,6 +132,24 @@ def get_recent_context(question: str) -> str:
         return f"ERROR: Mac-Actuator nicht erreichbar ({e})."
 
 
+async def describe_screen(anthropic_client=None) -> str:
+    try:
+        data = await _post("/screen/describe")
+        return data["result"]
+    except Exception as e:
+        return f"ERROR: Mac-Actuator nicht erreichbar ({e})."
+
+
+async def describe_screen_for_awareness(anthropic_client=None, excluded_apps=None) -> dict:
+    # excluded_apps wird bewusst ignoriert und NICHT mitgeschickt — der Mac
+    # liest seine eigene, lokale Ausschlussliste selbst (siehe mac_actuator.py),
+    # das ist die eine Quelle der Wahrheit dafuer, nicht der Server.
+    try:
+        return await _post("/screen/awareness")
+    except Exception as e:
+        return {"skipped": True, "reason": f"Mac-Actuator nicht erreichbar ({e})"}
+
+
 async def run_claude_code(task: str, timeout: int = 600) -> str:
     # Claude-Code-Aufgaben duerfen bis zu 10 Minuten dauern (siehe
     # claude_code_tool.DEFAULT_TIMEOUT) — eigener, grosszuegigerer Timeout

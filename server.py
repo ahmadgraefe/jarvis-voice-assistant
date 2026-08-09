@@ -198,6 +198,7 @@ AKTIONEN - Schreibe die passende Aktion ans ENDE deiner Antwort. Der Text VOR de
 [ACTION:SEARCH] suchbegriff - Internet durchsuchen und Ergebnisse zusammenfassen
 [ACTION:OPEN] url - URL im Browser oeffnen
 [ACTION:SCREEN] - Bildschirm ansehen und beschreiben. WICHTIG: Bei SCREEN schreibe NUR die Aktion, KEINEN Text davor. Also NUR "[ACTION:SCREEN]" und sonst nichts.
+[ACTION:SCREENHISTORY] stichwort_oder_datum - Durchsucht die im Hintergrund alle 20-30 Minuten aufgezeichneten Bildschirm-Beobachtungen (Text-Zusammenfassungen, keine Bilder, 30 Tage aufbewahrt). payload ist optional ein Stichwort oder ein Datum (JJJJ-MM-TT), leer = die letzten Eintraege. Nutze das wenn Ahmad fragt woran er zuletzt/heute/an einem bestimmten Tag gearbeitet hat. Schreibe vorher einen kurzen Satz wie "Ich schaue kurz in deine letzten Bildschirm-Beobachtungen."
 [ACTION:NEWS] - Aktuelle Weltnachrichten abrufen. Nutze diese Aktion wenn nach News, Nachrichten, was in der Welt passiert, aktuelle Lage oder Weltgeschehen gefragt wird. Schreibe einen kurzen Satz davor wie "Ich schaue nach den aktuellen Nachrichten."
 [ACTION:OPENAPP] appname - Eine App auf dem Mac oeffnen (z.B. "Spotify", "Notizen", "Calendar"). Nutze das wenn Sir dich bittet eine App zu oeffnen.
 [ACTION:WHATSAPP] empfaenger|nachricht - Eine WhatsApp-Nachricht schreiben UND SOFORT ABSENDEN, keine Bestaetigung noetig. empfaenger ist ein Name aus den Kontakten ODER eine Telefonnummer. Format IMMER "empfaenger|nachricht" mit einem Pipe-Zeichen dazwischen. Die Nachricht wird automatisch verschickt — sag das dem Nutzer auch so (z.B. "Nachricht ist raus, Sir"), frag NICHT ob du senden sollst.
@@ -291,7 +292,16 @@ def build_dynamic_block(query: str = "") -> str:
     if longterm:
         longterm_block = f"\n\n=== LANGZEITGEDAECHTNIS (relevanteste Eintraege zu deiner aktuellen Frage) ===\n{longterm}\n==="
 
-    return f"=== AKTUELLE DATEN ==={time_block}{weather_block}{task_block}\n==={history_block}{pending_block}{longterm_block}"
+    # Roadmap Punkt 19 — ambiente, ungefragte Kenntnis der letzten Bildschirm-
+    # Beobachtungen, damit du grob weisst woran Ahmad zuletzt gearbeitet hat
+    # ohne dass er es dir sagen muss. NICHT woertlich zitieren/vorlesen wenn
+    # nicht danach gefragt wird, nur als stillen Kontext nutzen.
+    screen_block = ""
+    recent_screen = memory.get_recent_screen_awareness()
+    if recent_screen:
+        screen_block = f"\n\n=== ZULETZT AUF DEM BILDSCHIRM (nur als stiller Kontext, nicht ungefragt vorlesen) ===\n{recent_screen}\n==="
+
+    return f"=== AKTUELLE DATEN ==={time_block}{weather_block}{task_block}\n==={history_block}{pending_block}{longterm_block}{screen_block}"
 
 
 def build_system_blocks(native: bool = False, query: str = "") -> list:
@@ -434,6 +444,9 @@ async def execute_action(action: dict) -> str:
 
     elif t == "SCREEN":
         return await screen_capture.describe_screen(ai)
+
+    elif t == "SCREENHISTORY":
+        return memory.search_screen_awareness(p.strip())
 
     elif t == "NEWS":
         result = await browser_tools.fetch_news()
@@ -823,6 +836,10 @@ async def _tool_screen(args: dict) -> str:
     return await screen_capture.describe_screen(ai)
 
 
+async def _tool_screen_history(args: dict) -> str:
+    return memory.search_screen_awareness(args.get("query", ""))
+
+
 async def _tool_open_url(args: dict) -> str:
     url = args["url"]
     await browser_tools.open_url(url)
@@ -1125,6 +1142,19 @@ TOOL_REGISTRY: dict = {
         handler=_tool_screen,
         speak_result=True,
         slow=True,
+    ),
+    "screen_history": ToolSpec(
+        schema={
+            "name": "screen_history",
+            "description": "Durchsucht die im Hintergrund alle 20-30 Minuten aufgezeichneten Bildschirm-Beobachtungen (Roadmap Punkt 19, Text-Zusammenfassungen, keine Bilder, 30 Tage aufbewahrt). Nutze das wenn Ahmad fragt woran er zuletzt/heute/an einem bestimmten Tag gearbeitet hat. query ist ein Stichwort oder ein Datum (JJJJ-MM-TT), leer = die letzten Eintraege insgesamt.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "Stichwort oder Datum, optional"}},
+                "required": [],
+            },
+        },
+        handler=_tool_screen_history,
+        speak_result=True,
     ),
     "open_url": ToolSpec(
         schema={
@@ -1908,7 +1938,7 @@ NATIVE_PORTED_ACTIONS = {
     # Batch: Sheets / Tracking / Jerome
     "WINNERTRACK", "WINNERSTATUS", "SCALINGLOG", "JEROMECHECK", "JEROMEBRIEF", "JEROMEMSG",
     # Batch: Rest
-    "OPENAPP", "CLAUDECODE", "CLAUDECODE_EXEC", "FANPLACE", "SLTBIO", "REMEMBER",
+    "OPENAPP", "CLAUDECODE", "CLAUDECODE_EXEC", "FANPLACE", "SLTBIO", "REMEMBER", "SCREENHISTORY",
 }
 
 

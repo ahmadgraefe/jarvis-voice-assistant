@@ -25,6 +25,7 @@ import whatsapp_tools
 import screen_control
 import claude_code_context
 import claude_code_tool
+import screen_capture
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 with open(CONFIG_PATH) as f:
@@ -158,6 +159,20 @@ class ClaudeCodeExecReq(BaseModel):
 async def claude_code_exec_endpoint(req: ClaudeCodeExecReq):
     result = await claude_code_tool.run_claude_code(req.task, req.timeout)
     return {"result": result}
+
+
+@app.post("/screen/describe")
+async def screen_describe():
+    return {"result": await screen_capture.describe_screen(ai)}
+
+
+@app.post("/screen/awareness")
+async def screen_awareness():
+    # Roadmap Punkt 19 — Ausschlussliste liest der Mac aus seiner eigenen,
+    # lokalen config.json (Ahmad pflegt sie hier direkt, keine Umwege ueber
+    # den Server noetig).
+    excluded_apps = config.get("screen_awareness_excluded_apps", [])
+    return await screen_capture.describe_screen_for_awareness(ai, excluded_apps)
 
 
 @app.get("/health")

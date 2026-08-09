@@ -554,3 +554,77 @@ def mark_content_brief_done():
     state["last_content_brief_date"] = time.strftime("%Y-%m-%d")
     with open(BRIEFING_STATE_PATH, "w") as f:
         json.dump(state, f)
+
+
+# --- Screen-Bewusstsein (Roadmap Punkt 19) ---
+# Eigener, separater Log statt ueber remember()/das Profil-Fakten-System zu
+# laufen — 48-70 Ambient-Eintraege am Tag wuerden das kuratierte Langzeit-
+# gedaechtnis verwaessern, das fuer bewusst wichtige Fakten gedacht ist.
+# Ahmads bewusste Entscheidung (per Rueckfrage): nur Text, nie Bilder,
+# 30 Tage rollierend.
+
+SCREEN_AWARENESS_LOG_PATH = os.path.join(MEMORY_DIR, "screen_awareness_log.jsonl")
+SCREEN_AWARENESS_RETENTION_DAYS = 30
+
+
+def add_screen_awareness_entry(text: str):
+    if not text:
+        return
+    os.makedirs(MEMORY_DIR, exist_ok=True)
+    entries = _load_screen_awareness_entries()
+    entries.append({"timestamp": time.strftime("%Y-%m-%d %H:%M:%S"), "text": text})
+
+    cutoff = time.time() - SCREEN_AWARENESS_RETENTION_DAYS * 86400
+    entries = [e for e in entries if _parse_timestamp(e.get("timestamp", "")) >= cutoff]
+
+    with open(SCREEN_AWARENESS_LOG_PATH, "w", encoding="utf-8") as f:
+        for e in entries:
+            f.write(json.dumps(e, ensure_ascii=False) + "\n")
+
+
+def _parse_timestamp(ts: str) -> float:
+    try:
+        return time.mktime(time.strptime(ts, "%Y-%m-%d %H:%M:%S"))
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _load_screen_awareness_entries() -> list:
+    if not os.path.exists(SCREEN_AWARENESS_LOG_PATH):
+        return []
+    entries = []
+    with open(SCREEN_AWARENESS_LOG_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return entries
+
+
+def get_recent_screen_awareness(max_entries: int = 3) -> str:
+    """Fuer die Ambient-Einbindung ins System-Prompt — Jarvis 'weiss' ohne
+    Nachfrage grob woran Ahmad zuletzt gearbeitet hat."""
+    entries = _load_screen_awareness_entries()[-max_entries:]
+    if not entries:
+        return ""
+    return "\n".join(f"[{e['timestamp']}] {e['text']}" for e in entries)
+
+
+def search_screen_awareness(query: str, max_results: int = 15) -> str:
+    """Einfache Substring-Suche fuer explizite Nachfragen ("was hab ich
+    heute gemacht") — bewusst KEINE Embedding-Suche, das waere fuer dieses
+    hochfrequente, niedrigwertige Log ueberdimensioniert (siehe semantic_
+    memory.py fuer die richtige Stelle fuer kuratierte Fakten)."""
+    entries = _load_screen_awareness_entries()
+    if not entries:
+        return "Noch keine Bildschirm-Beobachtungen aufgezeichnet."
+    query = (query or "").strip().lower()
+    if query:
+        matches = [e for e in entries if query in e["text"].lower() or query in e.get("timestamp", "")]
+    else:
+        matches = entries
+    matches = matches[-max_results:]
+    if not matches:
+        return f"Keine Bildschirm-Beobachtungen zu '{query}' in den letzten {SCREEN_AWARENESS_RETENTION_DAYS} Tagen gefunden."
+    return "\n".join(f"[{e['timestamp']}] {e['text']}" for e in matches)

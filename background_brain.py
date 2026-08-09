@@ -35,6 +35,7 @@ import knowledge_graph
 import memory
 import push_notifications
 import research
+import screen_capture
 import semantic_memory
 import sheets_tools
 import slt_bio_tools
@@ -66,6 +67,12 @@ GMAIL_REPLY_INTERVAL_SECONDS = 30 * 60  # aehnlich haeufig wie der Jerome-Kanal,
 MEETING_REMINDER_INTERVAL_SECONDS = 5 * 60  # eigener schneller Takt, keine
 # Arbeitszeit-Gate (Termine koennen jederzeit sein), Tier 3 Punkt 14, 2026-08-08.
 MEETING_REMINDER_LEAD_MINUTES = 20
+
+SCREEN_AWARENESS_INTERVAL_SECONDS = 25 * 60  # Roadmap Punkt 19, 2026-08-09 —
+# Ahmads bewusste Wahl nach Rueckfrage: "alle 20-30 Minuten", niedrigfrequent
+# sowohl fuers Risiko (Screenshot geht bei jeder Aufnahme an Claude Vision)
+# als auch fuer die Kosten. Bewusst KEIN _alert() dabei, rein passiv/ambient
+# — ein Alarm bei jedem Zyklus waere aufdringlich, nicht was Ahmad wollte.
 
 FINANCE_SYNC_INTERVAL_SECONDS = 6 * 60 * 60  # Tier 3 Punkt 15, 2026-08-08 —
 # Kurs+Payouts muessen nicht minuetlich aktuell sein, alle 6h reicht locker.
@@ -1530,6 +1537,31 @@ async def meeting_reminder_pass(config: dict):
         _log(f"Meeting-Reminder gesendet: '{e['summary']}' (in {minutes_left} Min).")
 
 
+async def screen_awareness_pass(config: dict):
+    """Roadmap Punkt 19, 2026-08-09 — periodische, niedrigfrequente
+    Bildschirm-Beobachtung. Rein passiv: kein _alert(), landet nur im
+    eigenen screen_awareness_log (memory.py), NICHT im kuratierten
+    Langzeitgedaechtnis. Screenshot-Bild existiert nie ausserhalb dieser
+    einen Vision-Analyse (Ahmads ausdrueckliche Wahl), nur der Text bleibt."""
+    client = anthropic.AsyncAnthropic(api_key=config["anthropic_api_key"])
+    try:
+        result = await screen_capture.describe_screen_for_awareness(client, [])
+    except Exception as e:
+        _log(f"FEHLER bei Screen-Awareness: {_exc(e)}")
+        return
+    finally:
+        await client.close()
+
+    if result.get("skipped"):
+        _log(f"Screen-Awareness uebersprungen: {result.get('reason', '')}")
+        return
+
+    text = result.get("text", "").strip()
+    if text:
+        memory.add_screen_awareness_entry(text)
+        _log(f"Screen-Awareness erfasst: {text[:100]}")
+
+
 async def finance_sync_pass(config: dict):
     """Haelt das Finanz-Sheet (finance_tracker.py, Tier 3 Punkt 15,
     2026-08-08) aktuell, ohne dass Ahmad etwas tun muss: Wechselkurs,
@@ -2103,6 +2135,7 @@ async def main():
     last_target_creator = timers.get("target_creator", 0)
     last_calendar_check = timers.get("calendar_check", 0)
     last_meeting_reminder = timers.get("meeting_reminder", 0)
+    last_screen_awareness = timers.get("screen_awareness", 0)
     last_finance_sync = timers.get("finance_sync", 0)
     last_gmail_reply = timers.get("gmail_reply", 0)
     last_goal_check = timers.get("goal_check", 0)
@@ -2169,6 +2202,17 @@ async def main():
 
             last_meeting_reminder = now
             _save_timer("meeting_reminder", now)
+
+        # Eigener Takt, siehe SCREEN_AWARENESS_INTERVAL_SECONDS oben —
+        # niedrigfrequent, rein passiv, Roadmap Punkt 19.
+        if now - last_screen_awareness >= SCREEN_AWARENESS_INTERVAL_SECONDS:
+            try:
+                await screen_awareness_pass(config)
+            except Exception as e:
+                _log(f"FEHLER bei Screen-Awareness: {_exc(e)}")
+
+            last_screen_awareness = now
+            _save_timer("screen_awareness", now)
 
         # Eigener Takt, siehe FINANCE_SYNC_INTERVAL_SECONDS oben — Kurs +
         # Fanplace-Payouts + zurueckhaltender Trend-Check.
