@@ -1074,7 +1074,10 @@ async def _tool_claude_code_context(args: dict) -> str:
 
 
 async def _tool_claude_code_exec(args: dict) -> str:
-    return await claude_code_tool.run_claude_code(args["task"])
+    task = args.get("task", "").strip()
+    if not task:
+        return "ERROR: Kein Auftrag angegeben, bitte die Aufgabe fuer Claude Code konkret formulieren."
+    return await claude_code_tool.run_claude_code(task)
 
 
 async def _tool_fanplace_snapshot(args: dict) -> str:

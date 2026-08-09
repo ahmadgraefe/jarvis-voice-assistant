@@ -12,12 +12,25 @@ to watch it happen.
 import asyncio
 import json
 import os
+import shutil
 import time
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
-LOG_PATH = os.path.expanduser("~/Library/Logs/jarvis-claudecode.log")
-CLAUDE_BIN = os.path.expanduser("~/.local/bin/claude")
 WORKDIR = os.path.dirname(__file__)
+
+# Server (Linux, laeuft als root): CLI-Aufruf muss auf einen eingeschraenkten
+# User ausweichen, --dangerously-skip-permissions verweigert sich sonst
+# (2026-08-09, "cannot be used with root/sudo privileges"). Mac: normaler
+# User, kein sudo-Umweg noetig. CLAUDE_BIN per PATH-Lookup statt hartem Pfad,
+# da Server (npm global, /usr/bin/claude) und Mac (~/.local/bin/claude)
+# unterschiedliche Installationsorte haben.
+IS_SERVER = os.environ.get("JARVIS_ROLE") == "server"
+CLAUDE_CODE_USER = "jarviscode"
+CLAUDE_BIN = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
+LOG_PATH = (
+    os.path.join(WORKDIR, "jarvis-claudecode.log") if IS_SERVER
+    else os.path.expanduser("~/Library/Logs/jarvis-claudecode.log")
+)
 
 DEFAULT_TIMEOUT = 600  # 10 min — real coding/research tasks take real time
 
@@ -35,18 +48,70 @@ def _log(msg: str):
         pass
 
 
+async def _git_sync_server_changes(task: str):
+    """Server-seitig (2026-08-10): Claude Code arbeitet auf /opt/jarvis, einer
+    vom Mac getrennten Projekt-Kopie. Ohne das hier wuerden Aenderungen dort
+    still liegen bleiben und von Ahmads naechstem Deploy ueberschrieben werden
+    koennen. Committed und pusht automatisch zum 'origin'-Remote (Deploy-Key
+    braucht Schreibzugriff, siehe README/UEBERGABE), damit Ahmad sie per
+    'git pull' auf dem Mac abholen kann. Kein Push noetig/sinnvoll wenn nichts
+    geaendert wurde."""
+    try:
+        status = await asyncio.create_subprocess_exec(
+            "git", "status", "--porcelain", cwd=WORKDIR,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        status_out, _ = await status.communicate()
+        if not status_out.strip():
+            _log("GIT-SYNC: keine Aenderungen, nichts zu committen.")
+            return
+
+        commit_msg = f"Claude Code (Server): {task[:100]}"
+        for cmd in (
+            ["git", "add", "-A"],
+            ["git", "commit", "-m", commit_msg],
+            ["git", "push", "origin", "master"],
+        ):
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, cwd=WORKDIR,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=60)
+            if proc.returncode != 0:
+                _log(f"GIT-SYNC FEHLER bei '{' '.join(cmd)}': {err.decode(errors='replace')[:300]}")
+                return
+        _log("GIT-SYNC: Aenderungen committed und gepusht.")
+    except Exception as e:
+        _log(f"GIT-SYNC FEHLER: {e}")
+
+
 async def run_claude_code(task: str, timeout: int = DEFAULT_TIMEOUT) -> str:
     """Run one non-interactive Claude Code task, scoped to this project's
     directory, with full tool access (file edits, shell commands). Returns
-    its final text output, or 'ERROR: ...' on failure/timeout."""
+    its final text output, or 'ERROR: ...' on failure/timeout.
+
+    Server (2026-08-10): laeuft nativ hier, nicht mehr per Mac-Actuator-Proxy
+    (Ahmads ausdruecklicher Wunsch, volle Funktionalitaet auch wenn der Mac
+    aus ist). Muss dabei als eingeschraenkter User laufen (CLAUDE_CODE_USER),
+    --dangerously-skip-permissions verweigert sich sonst fuer root/sudo
+    (live bestaetigt, 2026-08-09)."""
     config = _load_config()
-    env = {**os.environ, "ANTHROPIC_API_KEY": config["anthropic_api_key"]}
+
+    if IS_SERVER:
+        cmd = [
+            "sudo", "-u", CLAUDE_CODE_USER, "-H",
+            "env", f"ANTHROPIC_API_KEY={config['anthropic_api_key']}",
+            CLAUDE_BIN, "-p", task, "--dangerously-skip-permissions",
+        ]
+        env = os.environ.copy()
+    else:
+        cmd = [CLAUDE_BIN, "-p", task, "--dangerously-skip-permissions"]
+        env = {**os.environ, "ANTHROPIC_API_KEY": config["anthropic_api_key"]}
 
     _log(f"START: {task[:200]}")
     try:
         proc = await asyncio.create_subprocess_exec(
-            CLAUDE_BIN, "-p", task, "--dangerously-skip-permissions",
-            cwd=WORKDIR, env=env,
+            *cmd, cwd=WORKDIR, env=env,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -69,11 +134,8 @@ async def run_claude_code(task: str, timeout: int = DEFAULT_TIMEOUT) -> str:
         return f"ERROR: Claude Code Aufgabe fehlgeschlagen: {error_output[:500] or 'unbekannter Fehler'}"
 
     _log(f"FERTIG: {output[:200]}")
+
+    if IS_SERVER:
+        await _git_sync_server_changes(task)
+
     return output or "Claude Code hat die Aufgabe ohne Textausgabe abgeschlossen."
-
-
-# Server-Migration (Hetzner): siehe app_control.py, gleiches Prinzip. Die
-# claude-Binary und dieses Projektverzeichnis existieren nur auf dem Mac,
-# darum HTTP-Proxy an mac_actuator.py.
-if os.environ.get("JARVIS_ROLE") == "server":
-    from mac_actuator_client import run_claude_code  # noqa: E402,F811

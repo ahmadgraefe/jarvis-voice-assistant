@@ -69,13 +69,20 @@ def _format_for_jarvis(data: dict) -> str:
 
 
 async def _get_frontmost_app() -> str:
-    proc = await asyncio.create_subprocess_exec(
-        "osascript", "-e",
-        'tell application "System Events" to name of first application process whose frontmost is true',
-        stdout=asyncio.subprocess.PIPE,
-    )
-    stdout, _ = await proc.communicate()
-    return stdout.decode().strip()
+    """Leerer String wenn nicht ermittelbar (z.B. 'osascript' existiert auf
+    dem Hetzner-Server gar nicht) — _restore_focus() no-opt dann einfach,
+    macOS-Fensterverwaltung ist auf dem unsichtbaren Xvfb-Server ohnehin
+    bedeutungslos, siehe screen_capture.py's identisches Muster."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "osascript", "-e",
+            'tell application "System Events" to name of first application process whose frontmost is true',
+            stdout=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        return stdout.decode().strip()
+    except Exception:
+        return ""
 
 
 async def _restore_focus(app_name: str):
