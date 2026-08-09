@@ -23,6 +23,24 @@ let analyser = null;
 let audioLevelData = null;
 let audioUnlocked = false;
 
+// EIN wiederverwendetes <audio>-Element statt bei jeder Antwort ein neues
+// Audio()-Objekt zu erzeugen. Push-to-Talk braucht deutlich laenger bis zur
+// Antwort als Tippen (Aufnahme + Hochladen + Transkription obendrauf) —
+// WebKits "darf dieses Element gerade programmatisch abspielen"-Erlaubnis
+// kann in der Zwischenzeit ablaufen. Ein play()+pause() SYNCHRON innerhalb
+// jeder echten Beruehrung/jedes Klicks (siehe primeResponseAudio) auf GENAU
+// diesem wiederverwendeten Element macht spaetere asynchrone play()-Aufrufe
+// deutlich zuverlaessiger als bei einem frisch erzeugten Element.
+const responseAudio = new Audio();
+
+function primeResponseAudio() {
+    try {
+        const p = responseAudio.play();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+        responseAudio.pause();
+    } catch (e) { /* non-fatal */ }
+}
+
 function ensureAudioContext() {
     if (audioCtx) return;
     try {
@@ -319,11 +337,13 @@ function sendText(text) {
 }
 
 sendBtn.addEventListener('click', () => {
+    primeResponseAudio();
     sendText(textInput.value);
     textInput.value = '';
 });
 textInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
+        primeResponseAudio();
         sendText(textInput.value);
         textInput.value = '';
     }
@@ -350,25 +370,24 @@ function playNext() {
     const bytes = Uint8Array.from(atob(next.audio), c => c.charCodeAt(0));
     const blob = new Blob([bytes], { type: 'audio/mpeg' });
     const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    currentAudio = audio;
+    currentAudio = responseAudio;
 
     // Bewusst OHNE Web-Audio-Graph (kein createMediaElementSource/Analyser)
     // — das hier ist die tatsaechliche Sprachausgabe, die MUSS zuverlaessig
-    // hoerbar sein. Ein AudioContext kann auf iOS zwischenzeitlich wieder
-    // 'suspended' werden (z.B. waehrend des Server-Rundlaufs), was play()
-    // trotzdem erfolgreich zurueckmelden wuerde, aber STUMM bliebe — genau
-    // das hat vorhin die stumme Wiedergabe verursacht. Ein einfaches
-    // <audio>-Element spielt direkt ueber die normale Geraete-Ausgabe,
-    // unabhaengig vom AudioContext-Status. Die audio-reaktive Orb-Animation
-    // (Analyser) ist ein optionales Extra, keinen Ton wert.
-    audio.onended = () => { URL.revokeObjectURL(url); if (currentAudio === audio) currentAudio = null; playNext(); };
-    audio.onerror = () => { URL.revokeObjectURL(url); if (currentAudio === audio) currentAudio = null; playNext(); };
-    audio.play().catch((err) => {
+    // hoerbar sein, unabhaengig vom AudioContext-Status. Ausserdem bewusst
+    // dasselbe wiederverwendete <audio>-Element (responseAudio) statt bei
+    // jeder Antwort ein frisches Audio()-Objekt — siehe primeResponseAudio,
+    // deutlich zuverlaessiger bei Push-to-Talk (langer Rundlauf: Aufnahme
+    // + Hochladen + Transkription + LLM-Antwort, das Zeitfenster in dem
+    // WebKit programmatisches Abspielen noch erlaubt kann dabei ablaufen).
+    responseAudio.onended = () => { URL.revokeObjectURL(url); playNext(); };
+    responseAudio.onerror = () => { URL.revokeObjectURL(url); playNext(); };
+    responseAudio.src = url;
+    responseAudio.play().catch((err) => {
         status.textContent = 'Kein Ton (' + (err && err.name ? err.name : 'unbekannt') + '), bitte antippen.';
         document.addEventListener('click', function retry() {
             document.removeEventListener('click', retry);
-            audio.play().catch(() => playNext());
+            responseAudio.play().catch(() => playNext());
         }, { once: true });
     });
 }
@@ -443,10 +462,10 @@ async function onRecordingStop() {
     }
 }
 
-talkBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startRecording(); }, { passive: false });
-talkBtn.addEventListener('touchend', (e) => { e.preventDefault(); stopRecording(); }, { passive: false });
-talkBtn.addEventListener('mousedown', startRecording);
-talkBtn.addEventListener('mouseup', stopRecording);
+talkBtn.addEventListener('touchstart', (e) => { e.preventDefault(); primeResponseAudio(); startRecording(); }, { passive: false });
+talkBtn.addEventListener('touchend', (e) => { e.preventDefault(); primeResponseAudio(); stopRecording(); }, { passive: false });
+talkBtn.addEventListener('mousedown', () => { primeResponseAudio(); startRecording(); });
+talkBtn.addEventListener('mouseup', () => { primeResponseAudio(); stopRecording(); });
 talkBtn.addEventListener('mouseleave', () => { if (mediaRecorder && mediaRecorder.state === 'recording') stopRecording(); });
 
 // ---------------------------------------------------------------------------
@@ -462,6 +481,21 @@ function urlBase64ToUint8Array(base64String) {
     return Uint8Array.from([...rawData].map((c) => c.charCodeAt(0)));
 }
 
+async function subscribeAndSend(reg) {
+    const keyRes = await fetch('/push/vapid-public-key');
+    const { key } = await keyRes.json();
+    const sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(key),
+    });
+    await fetch('/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sub),
+    });
+    return sub;
+}
+
 async function enablePush() {
     if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
         status.textContent = 'Push wird von diesem Browser nicht unterstuetzt.';
@@ -474,17 +508,7 @@ async function enablePush() {
             status.textContent = 'Benachrichtigungen wurden nicht erlaubt.';
             return;
         }
-        const keyRes = await fetch('/push/vapid-public-key');
-        const { key } = await keyRes.json();
-        const sub = await reg.pushManager.subscribe({
-            userVisibleOnly: true,
-            applicationServerKey: urlBase64ToUint8Array(key),
-        });
-        await fetch('/push/subscribe', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(sub),
-        });
+        await subscribeAndSend(reg);
         pushBtn.classList.add('granted');
         status.textContent = 'Benachrichtigungen aktiv.';
     } catch (e) {
@@ -494,6 +518,33 @@ async function enablePush() {
 
 pushBtn.addEventListener('click', enablePush);
 
+// Beim Start pruefen ob bereits alles eingerichtet ist (Erlaubnis erteilt
+// UND ein Abo existiert bereits) — sonst musste Ahmad nach JEDEM
+// Neu-Oeffnen der App wieder auf "Benachrichtigungen aktivieren" tippen,
+// obwohl die Erlaubnis vom Betriebssystem her laengst besteht. Erlaubnis
+// selbst NUR bei einem echten Tap auf den Button abfragen (siehe
+// enablePush) — requestPermission() OHNE Geste wuerde iOS ohnehin
+// ignorieren/verweigern.
 if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+    navigator.serviceWorker.register('/static/sw.js').then(async (reg) => {
+        if (Notification.permission !== 'granted') return; // noch nie erlaubt, Button bleibt sichtbar
+        try {
+            let sub = await reg.pushManager.getSubscription();
+            if (!sub) {
+                // Erlaubnis besteht, aber (noch) kein Abo bei uns hinterlegt
+                // (z.B. nach Server-Neustart/Datenverlust) — im Hintergrund
+                // still nachholen, ohne Ahmad nochmal zu fragen.
+                sub = await subscribeAndSend(reg);
+            } else {
+                // Abo existiert bereits lokal, sicherheitshalber erneut an
+                // den Server melden (dedupliziert dort ueber den endpoint,
+                // kein Duplikat) — faengt einen Fall ab wo der Server das
+                // Abo verloren hat, obwohl der Browser es noch kennt.
+                await fetch('/push/subscribe', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sub),
+                }).catch(() => {});
+            }
+            pushBtn.classList.add('granted');
+        } catch (e) { /* still lassen, Button bleibt als Fallback sichtbar */ }
+    }).catch(() => {});
 }
