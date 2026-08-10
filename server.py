@@ -10,6 +10,7 @@ import dataclasses
 import json
 import os
 import re
+import shutil
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -1336,6 +1337,78 @@ async def _tool_list_decisions(args: dict) -> str:
     return knowledge_graph.list_decisions(args.get("status", "").strip())
 
 
+# --- Batch: Server-Auslastung ----------------------------------------------
+
+def _format_gb(num_bytes: float) -> str:
+    return f"{num_bytes / (1024 ** 3):.1f} GB"
+
+
+def _read_meminfo() -> dict:
+    """/proc/meminfo als dict {Feldname: Bytes}. Existiert nur unter Linux —
+    der Server laeuft auf Hetzner/Linux, psutil ist bewusst nicht als neue
+    Dependency dazugekommen. Auf einem anderen OS wirft das OSError, und der
+    Handler meldet das ehrlich statt eine Zahl zu erfinden."""
+    values = {}
+    with open("/proc/meminfo", "r") as f:
+        for line in f:
+            key, _, rest = line.partition(":")
+            parts = rest.split()
+            if not parts:
+                continue
+            try:
+                values[key.strip()] = int(parts[0]) * 1024  # /proc/meminfo ist in kB
+            except ValueError:
+                continue
+    return values
+
+
+async def _tool_server_status(args: dict) -> str:
+    path = (args.get("path") or "/").strip() or "/"
+    lines = []
+
+    try:
+        usage = shutil.disk_usage(path)
+        used_pct = usage.used / usage.total * 100 if usage.total else 0
+        lines.append(
+            f"Festplatte ({path}): {_format_gb(usage.free)} frei von {_format_gb(usage.total)} "
+            f"— {used_pct:.0f} Prozent belegt."
+        )
+    except OSError as e:
+        lines.append(f"Festplatte ({path}): ERROR: nicht auslesbar ({e}).")
+
+    try:
+        mem = _read_meminfo()
+        total = mem.get("MemTotal")
+        available = mem.get("MemAvailable")
+        if not total or available is None:
+            raise KeyError("MemTotal oder MemAvailable fehlt in /proc/meminfo")
+        used_pct = (total - available) / total * 100
+        lines.append(
+            f"Arbeitsspeicher: {_format_gb(available)} frei von {_format_gb(total)} "
+            f"— {used_pct:.0f} Prozent belegt."
+        )
+        swap_total = mem.get("SwapTotal") or 0
+        if swap_total:
+            swap_free = mem.get("SwapFree", 0)
+            lines.append(
+                f"Swap: {_format_gb(swap_free)} frei von {_format_gb(swap_total)}."
+            )
+    except (OSError, KeyError, ValueError) as e:
+        lines.append(f"Arbeitsspeicher: ERROR: nicht auslesbar ({e}).")
+
+    try:
+        load1, load5, load15 = os.getloadavg()
+        cores = os.cpu_count() or 0
+        core_hint = f" bei {cores} CPU-Kernen" if cores else ""
+        lines.append(
+            f"CPU-Last (1/5/15 Minuten): {load1:.2f} / {load5:.2f} / {load15:.2f}{core_hint}."
+        )
+    except (OSError, AttributeError) as e:
+        lines.append(f"CPU-Last: ERROR: nicht auslesbar ({e}).")
+
+    return "\n".join(lines)
+
+
 TOOL_REGISTRY: dict = {
     "screen": ToolSpec(
         schema={
@@ -1604,6 +1677,35 @@ TOOL_REGISTRY: dict = {
         handler=_tool_browser_extract,
         speak_result=True,
         slow=True,
+    ),
+    "server_status": ToolSpec(
+        schema={
+            "name": "server_status",
+            "description": (
+                "Liest die aktuelle Auslastung des Servers, auf dem Jarvis selbst laeuft: "
+                "freier Speicherplatz auf der Festplatte, freier Arbeitsspeicher (plus Swap, "
+                "falls vorhanden) und die CPU-Last der letzten 1/5/15 Minuten. Nutze das bei "
+                "Fragen wie 'wie ausgelastet ist der Server', 'wie viel Speicherplatz ist noch "
+                "frei', 'wie viel RAM ist belegt' oder 'ist die Platte voll'. Werte werden live "
+                "vom System gelesen — was nicht auslesbar ist, wird als ERROR gemeldet und "
+                "darf NIEMALS durch eine geschaetzte Zahl ersetzt werden."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Optionaler Pfad/Mountpoint fuer die Festplatten-Abfrage, "
+                            "Default '/' (Hauptplatte)."
+                        ),
+                    },
+                },
+                "required": [],
+            },
+        },
+        handler=_tool_server_status,
+        speak_result=True,
     ),
     "self_improve_log": ToolSpec(
         schema={
