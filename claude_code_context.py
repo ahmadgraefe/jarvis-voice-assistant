@@ -10,8 +10,23 @@ import glob
 import json
 import os
 import re
+import time
 
-PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
+# Server (2026-08-10): kein Live-Proxy zum Mac mehr fuer diese Funktion.
+# Stattdessen liest der Server eine per periodischem rsync vom Mac
+# gespiegelte Kopie (siehe scripts/sync-claude-projects.sh + LaunchAgent
+# com.jarvis.claudesync, alle 30 Min) — Ahmads Sitzungen entstehen zwar
+# zwangslaeufig nur auf dem Mac (dort programmiert er wirklich), aber der
+# Server muss dafuer nicht mehr live erreichbar sein und faellt bei
+# "Mac aus" nicht mehr komplett aus, sondern liefert die letzte bekannte
+# Kopie mit einem Alters-Hinweis.
+IS_SERVER = os.environ.get("JARVIS_ROLE") == "server"
+PROJECTS_DIR = (
+    os.path.join(os.path.dirname(__file__), "claude_projects_sync")
+    if IS_SERVER
+    else os.path.expanduser("~/.claude/projects")
+)
+SYNC_STAMP_FILE = os.path.join(PROJECTS_DIR, "_last_sync_epoch.txt")
 APP_STATUS_PATH = os.path.join(os.path.dirname(__file__), "claude_app_status.md")
 MAX_PROJECTS = 3
 MAX_TURNS_PER_PROJECT = 15
@@ -88,6 +103,25 @@ def _read_app_status() -> str:
     return text[:MAX_CHARS]
 
 
+def _sync_staleness_note() -> str:
+    """Nur auf dem Server relevant — sagt ehrlich wie alt die gespiegelte
+    Kopie ist, statt stillschweigend veraltete Daten als aktuell auszugeben."""
+    if not IS_SERVER:
+        return ""
+    try:
+        with open(SYNC_STAMP_FILE, encoding="utf-8") as f:
+            synced_at = float(f.read().strip())
+    except (OSError, ValueError):
+        return "Hinweis: Noch keine Synchronisierung der Claude-Code-Sitzungen vom Mac erfolgt.\n\n"
+
+    age_minutes = (time.time() - synced_at) / 60
+    if age_minutes < 5:
+        return ""
+    if age_minutes < 90:
+        return f"Hinweis: Diese Daten sind vom letzten Sync vor ca. {int(age_minutes)} Minuten, nicht live.\n\n"
+    return f"Hinweis: Diese Daten sind vom letzten Sync vor ca. {age_minutes / 60:.1f} Stunden (Mac evtl. laenger aus), nicht live.\n\n"
+
+
 def get_recent_context(question: str) -> str:
     """Return recent Claude Code conversation turns aus den zuletzt aktiven
     Projekten (Multi-Repo-Bewusstsein, Roadmap Punkt 18) PLUS any notes
@@ -130,14 +164,6 @@ def get_recent_context(question: str) -> str:
         blocks.append(f"Projekt '{label}':\n{excerpt}")
 
     if not blocks:
-        return "Kein Claude Code Gespraechsverlauf und keine App-Notizen gefunden."
+        return _sync_staleness_note() + "Kein Claude Code Gespraechsverlauf und keine App-Notizen gefunden."
 
-    return f"Frage von Ahmad: {question}\n\n" + "\n\n---\n\n".join(blocks)
-
-
-# Server-Migration (Hetzner): siehe app_control.py, gleiches Prinzip. Auf dem
-# Server existieren weder lokale Transkripte noch Claude-Code-Zugriff, darum
-# HTTP-Proxy an mac_actuator.py (laeuft auf dem Mac, wo diese Daten wirklich
-# liegen).
-if os.environ.get("JARVIS_ROLE") == "server":
-    from mac_actuator_client import get_recent_context  # noqa: E402,F811
+    return _sync_staleness_note() + f"Frage von Ahmad: {question}\n\n" + "\n\n---\n\n".join(blocks)
