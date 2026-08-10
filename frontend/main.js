@@ -358,12 +358,14 @@ function interruptSpeech() {
     }
     audioQueue = [];
     isPlaying = false;
+    stopBargeInWatch();
 }
 
 function playNext() {
     if (audioQueue.length === 0) {
         isPlaying = false;
         currentAudio = null;
+        stopBargeInWatch();
         Orb.setState('idle');
         status.textContent = '';
         // Brief cooldown before the mic reopens — catching the tail end of
@@ -375,6 +377,7 @@ function playNext() {
         return;
     }
     isPlaying = true;
+    startBargeInWatch();
     const next = audioQueue.shift();
     const b64 = next.audio;
     if (next.proactive) {
@@ -431,6 +434,91 @@ function playNext() {
             }).catch(() => playNext());
         });
     });
+}
+
+// ---------------------------------------------------------------------------
+// Barge-in (Roadmap Punkt 20) — waehrend Jarvis spricht bleibt die normale
+// SpeechRecognition AUS (Echo-Risiko, siehe playNext), aber ein separater,
+// leichtgewichtiger Lautstaerke-Waechter laeuft parallel mit: KEINE
+// Spracherkennung, nur "ist da gerade ein echtes, deutlich lauteres Signal
+// als das was Jarvis selbst gerade ausgibt". Erkennt er das sustained ueber
+// VAD_SUSTAIN_MS, wird sofort unterbrochen und danach erst die echte
+// Spracherkennung gestartet (dann in Stille, kein Selbst-Trigger-Risiko
+// mehr). Schwelle ist relativ zur eigenen Ausgabelautstaerke (getAudioLevel,
+// bereits fuer die Orb-Visualisierung vorhanden) statt eines festen Werts —
+// laut sprechende Jarvis-Antworten brauchen dadurch automatisch einen
+// lauteren Interrupt als leise, statt bei fester Schwelle staendig falsch
+// auszuloesen. Muss live an Ahmads Mikro/Lautsprecher-Setup nachjustiert
+// werden, darum alle Zahlen als Konstanten ganz oben in diesem Block.
+const VAD_MIN_ABSOLUTE = 0.05;   // Mic-Level muss IMMER mindestens das ueberschreiten
+const VAD_BLEED_FACTOR = 1.4;    // wie viel lauter als die erwartete Lautsprecher-Ruecklaufmenge
+const VAD_SUSTAIN_MS = 280;      // so lange am Stueck ueber der Schwelle (filtert kurze Stoergeraeusche)
+const VAD_POLL_MS = 40;
+
+let vadStream = null;
+let vadAnalyser = null;
+let vadData = null;
+let vadTimer = null;
+let vadAboveSince = null;
+
+function vadLevel() {
+    if (!vadAnalyser || !vadData) return 0;
+    vadAnalyser.getByteFrequencyData(vadData);
+    let sum = 0;
+    for (let i = 0; i < vadData.length; i++) sum += vadData[i];
+    return Math.min(1, (sum / vadData.length) / 110);
+}
+
+async function startBargeInWatch() {
+    if (vadStream) return; // laeuft schon
+    try {
+        ensureAudioContext();
+        vadStream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+        const src = audioCtx.createMediaStreamSource(vadStream);
+        vadAnalyser = audioCtx.createAnalyser();
+        vadAnalyser.fftSize = 256;
+        vadAnalyser.smoothingTimeConstant = 0.6;
+        vadData = new Uint8Array(vadAnalyser.frequencyBinCount);
+        src.connect(vadAnalyser);
+        vadAboveSince = null;
+        vadTimer = setInterval(pollVad, VAD_POLL_MS);
+    } catch (e) {
+        console.warn('[jarvis] Barge-in: Mikrofon fuer Lautstaerke-Waechter nicht verfuegbar', e);
+    }
+}
+
+function stopBargeInWatch() {
+    if (vadTimer) { clearInterval(vadTimer); vadTimer = null; }
+    if (vadStream) { vadStream.getTracks().forEach(t => t.stop()); vadStream = null; }
+    vadAnalyser = null;
+    vadData = null;
+    vadAboveSince = null;
+}
+
+function pollVad() {
+    if (!isPlaying || !vadStream) return;
+    const mic = vadLevel();
+    const speakerLevel = getAudioLevel(); // Jarvis' eigene Ausgabe gerade jetzt
+    const threshold = Math.max(VAD_MIN_ABSOLUTE, speakerLevel * VAD_BLEED_FACTOR);
+    const now = performance.now();
+    if (mic > threshold) {
+        if (vadAboveSince === null) vadAboveSince = now;
+        if (now - vadAboveSince >= VAD_SUSTAIN_MS) {
+            console.log('[jarvis] Barge-in ausgeloest — mic:', mic.toFixed(3), 'schwelle:', threshold.toFixed(3));
+            triggerBargeIn();
+        }
+    } else {
+        vadAboveSince = null;
+    }
+}
+
+function triggerBargeIn() {
+    interruptSpeech(); // stoppt auch den VAD-Waechter selbst (siehe dort)
+    pausedByUser = false;
+    markActivity();
+    startListening();
 }
 
 // Speech Recognition

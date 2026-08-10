@@ -354,11 +354,13 @@ function playNext() {
     if (audioQueue.length === 0) {
         isPlaying = false;
         currentAudio = null;
+        stopBargeInWatch();
         Orb.setState('idle');
         status.textContent = '';
         return;
     }
     isPlaying = true;
+    startBargeInWatch();
     const next = audioQueue.shift();
     Orb.setState(next.proactive ? 'announcing' : 'speaking');
     status.textContent = next.proactive ? 'Jarvis meldet sich...' : '';
@@ -390,6 +392,7 @@ function playNext() {
 
 canvas.addEventListener('click', () => {
     if (isPlaying) {
+        stopBargeInWatch();
         if (currentAudio) currentAudio.pause();
         audioQueue = [];
         isPlaying = false;
@@ -399,6 +402,144 @@ canvas.addEventListener('click', () => {
 });
 
 connect();
+
+// ---------------------------------------------------------------------------
+// Barge-in (Roadmap Punkt 20) — gleiches Prinzip wie main.js (Mac): waehrend
+// Jarvis spricht laeuft ein leichtgewichtiger Lautstaerke-Waechter mit (KEIN
+// echtes Zuhoeren/Transkribieren), erkennt er ein deutlich lauteres Signal
+// als Jarvis' eigene Ausgabe gerade produziert, unterbricht er SOFORT — das
+// ist rein lokale Audio-Pegel-Messung, kein Server-Umweg, also genauso
+// schnell wie am Mac. Danach unterscheidet sich der Ablauf: iOS hat keine
+// eingebaute Dauer-Spracherkennung (siehe Datei-Kopf), darum startet nach
+// dem Unterbrechen automatisch dieselbe Aufnahme wie beim Push-to-Talk-
+// Knopf, stoppt selbststaendig nach einer kurzen Sprechpause, und geht dann
+// denselben Weg wie sonst (Hochladen, Transkription, Antwort) — das kostet
+// dort ein bis zwei Sekunden extra, das Unterbrechen selbst aber nicht.
+// ---------------------------------------------------------------------------
+const VAD_MIN_ABSOLUTE = 0.05;
+const VAD_BLEED_FACTOR = 1.4;
+const VAD_SUSTAIN_MS = 280;
+const VAD_POLL_MS = 40;
+
+let vadStream = null;
+let vadAnalyser = null;
+let vadData = null;
+let vadTimer = null;
+let vadAboveSince = null;
+
+function vadLevel() {
+    if (!vadAnalyser || !vadData) return 0;
+    vadAnalyser.getByteFrequencyData(vadData);
+    let sum = 0;
+    for (let i = 0; i < vadData.length; i++) sum += vadData[i];
+    return Math.min(1, (sum / vadData.length) / 110);
+}
+
+async function startBargeInWatch() {
+    if (vadStream) return;
+    try {
+        ensureAudioContext();
+        vadStream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+        const src = audioCtx.createMediaStreamSource(vadStream);
+        vadAnalyser = audioCtx.createAnalyser();
+        vadAnalyser.fftSize = 256;
+        vadAnalyser.smoothingTimeConstant = 0.6;
+        vadData = new Uint8Array(vadAnalyser.frequencyBinCount);
+        src.connect(vadAnalyser);
+        vadAboveSince = null;
+        vadTimer = setInterval(pollVad, VAD_POLL_MS);
+    } catch (e) {
+        console.warn('[jarvis] Barge-in: Mikrofon nicht verfuegbar', e);
+    }
+}
+
+function stopBargeInWatch() {
+    if (vadTimer) { clearInterval(vadTimer); vadTimer = null; }
+    if (vadStream) { vadStream.getTracks().forEach(t => t.stop()); vadStream = null; }
+    vadAnalyser = null;
+    vadData = null;
+    vadAboveSince = null;
+}
+
+function pollVad() {
+    if (!isPlaying || !vadStream) return;
+    const mic = vadLevel();
+    const speakerLevel = getAudioLevel();
+    const threshold = Math.max(VAD_MIN_ABSOLUTE, speakerLevel * VAD_BLEED_FACTOR);
+    const now = performance.now();
+    if (mic > threshold) {
+        if (vadAboveSince === null) vadAboveSince = now;
+        if (now - vadAboveSince >= VAD_SUSTAIN_MS) {
+            console.log('[jarvis] Barge-in ausgeloest — mic:', mic.toFixed(3), 'schwelle:', threshold.toFixed(3));
+            triggerBargeIn();
+        }
+    } else {
+        vadAboveSince = null;
+    }
+}
+
+function triggerBargeIn() {
+    stopBargeInWatch();
+    if (currentAudio) currentAudio.pause();
+    audioQueue = [];
+    isPlaying = false;
+    Orb.setState('listening');
+    status.textContent = 'Ich hoere...';
+    primeResponseAudio();
+    startRecording().then(() => {
+        talkBtn.textContent = '🔴 Ich hoere zu...'; // kein Knopf gedrueckt, "Loslassen" waere hier irrefuehrend
+        watchForSilenceAndAutoStop();
+    });
+}
+
+// Stoppt die per triggerBargeIn gestartete Aufnahme selbststaendig nach
+// einer kurzen Sprechpause, statt auf Loslassen eines Knopfs zu warten (den
+// gibt es hier ja nicht) — sonst wuerde MAX_RECORDING_MS als einzige Grenze
+// gelten, spuerbar traege.
+function watchForSilenceAndAutoStop() {
+    setTimeout(() => {
+        if (!mediaStream || !mediaRecorder || mediaRecorder.state !== 'recording') return;
+        const src = audioCtx.createMediaStreamSource(mediaStream);
+        const a = audioCtx.createAnalyser();
+        a.fftSize = 256;
+        const data = new Uint8Array(a.frequencyBinCount);
+        src.connect(a);
+
+        const SILENCE_THRESHOLD = 0.04;
+        const SILENCE_HOLD_MS = 1200;
+        const MAX_RECORDING_MS = 12000;
+        const startedAt = performance.now();
+        let heardSpeech = false;
+        let silenceSince = null;
+
+        function check() {
+            if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
+            a.getByteFrequencyData(data);
+            let sum = 0;
+            for (let i = 0; i < data.length; i++) sum += data[i];
+            const level = Math.min(1, (sum / data.length) / 110);
+            const now = performance.now();
+            if (level > SILENCE_THRESHOLD) {
+                heardSpeech = true;
+                silenceSince = null;
+            } else if (heardSpeech) {
+                if (silenceSince === null) silenceSince = now;
+                if (now - silenceSince >= SILENCE_HOLD_MS) {
+                    stopRecording();
+                    return;
+                }
+            }
+            if (now - startedAt >= MAX_RECORDING_MS) {
+                stopRecording();
+                return;
+            }
+            requestAnimationFrame(check);
+        }
+        check();
+    }, 50);
+}
 
 // ---------------------------------------------------------------------------
 // Push-to-Talk — Aufnahme per MediaRecorder, Transkription server-seitig
