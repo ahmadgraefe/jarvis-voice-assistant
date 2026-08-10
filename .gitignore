@@ -8,7 +8,6 @@ config.json
 fanplace_session.json
 gmail_token.json
 sheets_token.json
-claude_app_status.md
 memory/
 instagram_session.json
 instagram_session_test.json
