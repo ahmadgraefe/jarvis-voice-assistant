@@ -2516,6 +2516,24 @@ async def _run_tool(block) -> dict:
     return {"tool_use_id": block.id, "content": str(result), "is_error": str(result).startswith("ERROR:")}
 
 
+_SENTENCE_END_RE = re.compile(r'[.!?]+[)\]"\']*\s+')
+
+
+def _extract_ready_sentence(buffer: str) -> tuple:
+    """Echtzeit-Sprachpfad — findet das letzte abgeschlossene Satzende im
+    bisher gestreamten Text. Gibt (fertiger_teil, rest) zurueck, oder
+    ("", buffer) wenn noch kein vollstaendiger Satz vorliegt. Nimmt bewusst
+    den LETZTEN Treffer im Puffer (nicht den ersten) — kommen mehrere kurze
+    Saetze in einem Delta-Schub auf einmal an, gehen sie zusammen raus statt
+    einzeln nachgetriggert zu werden."""
+    last_end = 0
+    for m in _SENTENCE_END_RE.finditer(buffer):
+        last_end = m.end()
+    if last_end == 0:
+        return "", buffer
+    return buffer[:last_end].strip(), buffer[last_end:]
+
+
 async def process_message_native(session_id: str, user_text: str, ws: WebSocket):
     """Nativer tool_use/tool_result-Loop — Ersatz fuer den [ACTION:X]-Regex-
     Trick, siehe Plan 'Nativer Tool-Use-Loop fuer server.py'. Nur hinter
@@ -2533,28 +2551,61 @@ async def process_message_native(session_id: str, user_text: str, ws: WebSocket)
     memory.append_turn("user", user_text)
 
     for round_num in range(MAX_TOOL_ROUNDS):
+        # Echtzeit-Sprachpfad: Claude-Antwort satzweise streamen statt auf die
+        # komplette Antwort zu warten — jeder fertige Satz geht sofort per
+        # _speak() raus (eigenes WS-Frame), das Frontend spielt mehrere
+        # eintreffende Audio-Frames ohnehin schon nacheinander ab (audioQueue/
+        # playNext, gleicher Mechanismus wie bei proaktiven Nachrichten). Senkt
+        # die Zeit bis zum ersten hoerbaren Wort von "ganze Antwort" auf "ein
+        # Satz", spuerbar besonders bei Tool-Aufrufen (vorher: zwei komplett
+        # blockierende Runden hintereinander, jetzt ueberlappt das Sprechen
+        # eines Lead-ins mit der laufenden Generierung).
+        sentence_buffer = ""
+        any_text_spoken = False
+        filler_played = False
         try:
-            response = await ai.messages.create(
+            async with ai.messages.stream(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=250,
                 system=build_system_blocks(native=True, query=user_text),
                 tools=TOOLS,
                 messages=_safe_recent_history(session_id),
-            )
+            ) as stream:
+                async for event in stream:
+                    if event.type == "content_block_delta" and event.delta.type == "text_delta":
+                        sentence_buffer += event.delta.text
+                        sentence, sentence_buffer = _extract_ready_sentence(sentence_buffer)
+                        if sentence:
+                            await _speak(session_id, ws, sentence)
+                            any_text_spoken = True
+                    elif event.type == "content_block_start" and event.content_block.type == "tool_use":
+                        # Fuellsatz JETZT schon moeglich (Tool-Name ist bereits
+                        # bekannt, noch bevor die Argumente fertig gestreamt
+                        # sind) — nur wenn das Modell noch kein eigenes Lead-in
+                        # gesagt/angefangen hat, gleiche Regel wie vorher.
+                        if not filler_played and not any_text_spoken and not sentence_buffer.strip():
+                            spec = TOOL_REGISTRY.get(event.content_block.name)
+                            if spec and spec.slow:
+                                filler = SLOW_TOOL_FILLERS.get(event.content_block.name)
+                                if filler:
+                                    await _speak(session_id, ws, filler)
+                                    filler_played = True
+                if sentence_buffer.strip():
+                    await _speak(session_id, ws, sentence_buffer.strip())
+                response = await stream.get_final_message()
         except Exception as e:
             await _handle_llm_error(session_id, ws, e)
             return
 
-        text_blocks = [b.text for b in response.content if b.type == "text" and b.text.strip()]
         tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
         print(
-            f"  LLM raw (native, round {round_num}): text={text_blocks} "
-            f"tools={[b.name for b in tool_use_blocks]}",
+            f"  LLM raw (native, round {round_num}): "
+            f"text_spoken={any_text_spoken} tools={[b.name for b in tool_use_blocks]}",
             flush=True,
         )
 
-        for t in text_blocks:
-            await _speak(session_id, ws, t)
+        # Text wurde bereits waehrend des Streams satzweise gesprochen (oben) —
+        # kein zweites _speak() ueber response.content mehr noetig.
 
         # response.content selbst (nicht die Textstrings) muss unveraendert
         # zurueck in die history — die tool_use-Bloecke tragen die IDs, die
@@ -2563,15 +2614,6 @@ async def process_message_native(session_id: str, user_text: str, ws: WebSocket)
 
         if not tool_use_blocks:
             return  # (a) einfache Antwort ohne Tool-Aufruf — fertig
-
-        if not text_blocks:
-            for b in tool_use_blocks:
-                spec = TOOL_REGISTRY.get(b.name)
-                if spec and spec.slow:
-                    filler = SLOW_TOOL_FILLERS.get(b.name)
-                    if filler:
-                        await _speak(session_id, ws, filler)
-                    break  # ein Fuellsatz reicht auch bei mehreren langsamen Calls
 
         results = await asyncio.gather(*(_run_tool(b) for b in tool_use_blocks))
         for r in results:
