@@ -3,6 +3,7 @@ Jarvis V2 — Browser Tools
 Web search via DuckDuckGo Lite, page visits via Playwright, URL opening.
 """
 
+import json
 import re
 import webbrowser
 import subprocess
@@ -13,6 +14,12 @@ from playwright.async_api import async_playwright
 _browser = None
 _context = None
 _tabs = {}  # Tab-Handle -> Playwright Page, Tier 3 Punkt 16 (2026-08-08)
+
+# Roadmap Punkt 25 — einheitliche Grenze fuer alles was als Rohtext direkt in
+# die Konversation geht (vorher drei verschiedene Werte 3000/5000/9000, dazu
+# hat server.py das Ergebnis nochmal zusaetzlich auf 2000 gekappt und damit
+# den bereits gebauten Fortschritt bei _describe_tab wieder zunichte gemacht).
+WEB_CONTENT_MAX_CHARS = 8000
 
 
 def _bring_chromium_to_front():
@@ -73,7 +80,7 @@ async def search_and_read(query: str) -> dict:
                     return document.body?.innerText?.trim() || '';
                 }
             """)
-            return {"title": title, "url": url, "content": text[:3000]}
+            return {"title": title, "url": url, "content": text[:WEB_CONTENT_MAX_CHARS]}
         else:
             return {"title": "Keine Ergebnisse", "url": search_url, "content": "Keine Ergebnisse gefunden."}
     except Exception as e:
@@ -130,7 +137,7 @@ async def search_multiple(query: str, count: int = 5) -> list:
         await page.close()
 
 
-async def visit(url: str, max_chars: int = 5000) -> dict:
+async def visit(url: str, max_chars: int = WEB_CONTENT_MAX_CHARS) -> dict:
     """Visit a URL and extract main text content."""
     ctx = await _get_browser()
     page = await ctx.new_page()
@@ -190,7 +197,7 @@ async def _wait_for_dynamic_content(page):
     await page.wait_for_timeout(800)
 
 
-async def _describe_tab(tab_id: str, max_chars: int = 9000) -> dict:
+async def _describe_tab(tab_id: str, max_chars: int = WEB_CONTENT_MAX_CHARS) -> dict:
     page = _tabs[tab_id]
     await _wait_for_dynamic_content(page)
     text = await page.evaluate(_EXTRACT_CONTENT_JS)
@@ -257,6 +264,50 @@ async def read_tab(tab_id: str) -> dict:
     if tab_id not in _tabs:
         return {"error": f"Kein offener Tab mit Handle '{tab_id}'. Offene Tabs: {list(_tabs.keys())}"}
     return await _describe_tab(tab_id)
+
+
+# Eigener, groesserer Wert NUR fuer den Extraktions-Input (geht an Claude als
+# Zwischenschritt, nicht direkt an die Konversation, darf darum grosszuegiger
+# sein als WEB_CONTENT_MAX_CHARS).
+EXTRACTION_INPUT_MAX_CHARS = 20000
+
+
+async def extract_structured(client, tab_id: str, what: str) -> dict:
+    """Roadmap Punkt 25 — verwandelt den Fliesstext eines bereits offenen Tabs
+    in saubere Felder (Preis/Anbieter/Zeit/Ort etc.) statt den rohen Text dem
+    Modell zum Selbst-Interpretieren zu ueberlassen. Gleiche Konvention wie
+    gmail_tools.classify_and_draft_reply: Client wird reingereicht, Prompt
+    verlangt explizit reines JSON, Parsing per index/rindex-Slice vor
+    json.loads, ehrlicher Fehler statt Rateversuch bei Parse-Problemen."""
+    if tab_id not in _tabs:
+        return {"error": f"Kein offener Tab mit Handle '{tab_id}'. Offene Tabs: {list(_tabs.keys())}"}
+    page = _tabs[tab_id]
+    await _wait_for_dynamic_content(page)
+    text = await page.evaluate(_EXTRACT_CONTENT_JS)
+    text = text[:EXTRACTION_INPUT_MAX_CHARS]
+    if not text.strip():
+        return {"tab_id": tab_id, "url": page.url, "items": []}
+
+    prompt = (
+        f"Hier ist der Text einer Webseite:\n\n{text}\n\n"
+        f"Extrahiere ALLE Eintraege zu: {what}\n"
+        "Antworte NUR als JSON-Array, jedes Element ein Objekt mit sinnvollen, kurzen "
+        "deutschen Feldnamen passend zur Anfrage (z.B. preis, anbieter, zeit, ort). "
+        "Fehlt ein Feld erkennbar auf der Seite, nutze null statt zu raten. "
+        "Steht nichts Passendes auf der Seite, antworte mit []."
+    )
+    try:
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = response.content[0].text.strip()
+        start, end = raw.index("["), raw.rindex("]") + 1
+        items = json.loads(raw[start:end])
+        return {"tab_id": tab_id, "url": page.url, "items": items}
+    except Exception as e:
+        return {"error": f"Strukturierte Extraktion fehlgeschlagen: {e}"}
 
 
 async def _find_element(page, description: str):

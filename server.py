@@ -867,14 +867,14 @@ async def _tool_read_insights(args: dict) -> str:
 async def _tool_search(args: dict) -> str:
     result = await browser_tools.search_and_read(args["query"])
     if "error" not in result:
-        return f"Seite: {result.get('title', '')}\nURL: {result.get('url', '')}\n\n{result.get('content', '')[:2000]}"
+        return f"Seite: {result.get('title', '')}\nURL: {result.get('url', '')}\n\n{result.get('content', '')}"
     return f"Suche fehlgeschlagen: {result.get('error', '')}"
 
 
 async def _tool_browse(args: dict) -> str:
     result = await browser_tools.visit(args["url"])
     if "error" not in result:
-        return f"Seite: {result.get('title', '')}\n\n{result.get('content', '')[:2000]}"
+        return f"Seite: {result.get('title', '')}\n\n{result.get('content', '')}"
     return f"Seite nicht erreichbar: {result.get('error', '')}"
 
 
@@ -891,7 +891,7 @@ async def _tool_search_compare(args: dict) -> str:
 def _format_tab(result: dict) -> str:
     if "error" in result:
         return f"ERROR: {result['error']}"
-    return f"[{result['tab_id']}] {result.get('title', '')}\n{result.get('url', '')}\n\n{result.get('content', '')[:2000]}"
+    return f"[{result['tab_id']}] {result.get('title', '')}\n{result.get('url', '')}\n\n{result.get('content', '')}"
 
 
 async def _tool_browser_open_tab(args: dict) -> str:
@@ -923,6 +923,20 @@ async def _tool_browser_click(args: dict) -> str:
 
 async def _tool_browser_fill_field(args: dict) -> str:
     return await browser_tools.fill_field(args["tab_id"], args["field_description"], args["value"])
+
+
+async def _tool_browser_extract(args: dict) -> str:
+    result = await browser_tools.extract_structured(ai, args["tab_id"], args["what"])
+    if "error" in result:
+        return f"ERROR: {result['error']}"
+    items = result.get("items", [])
+    if not items:
+        return "Keine passenden Eintraege auf der Seite gefunden."
+    lines = []
+    for i, item in enumerate(items, 1):
+        fields = " | ".join(f"{k}: {v}" for k, v in item.items())
+        lines.append(f"{i}. {fields}")
+    return "\n".join(lines)
 
 
 async def _tool_news(args: dict) -> str:
@@ -1377,6 +1391,32 @@ TOOL_REGISTRY: dict = {
         handler=_tool_browser_fill_field,
         speak_result=True,  # gleicher Grund wie browser_open_tab — nach dem
         # Ausfuellen folgt meist noch ein Klick oder eine Pruefung
+    ),
+    "browser_extract": ToolSpec(
+        schema={
+            "name": "browser_extract",
+            "description": (
+                "Liest einen bereits offenen Tab (browser_open_tab/browser_read_tab) und extrahiert "
+                "ALLE passenden Eintraege als saubere Felder statt Fliesstext — nutze das bei "
+                "Vergleichs-/Listenseiten mit vielen aehnlichen Eintraegen (Fluege, Preise, Angebote), "
+                "statt selbst aus dem rohen Text zu raten. Fuer einzelne Fakten oder kurze Seiten "
+                "reicht browser_read_tab weiterhin."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "tab_id": {"type": "string"},
+                    "what": {
+                        "type": "string",
+                        "description": "Was extrahiert werden soll, mit Feldern, z.B. 'Flugangebote mit Preis, Airline, Abflugzeit'.",
+                    },
+                },
+                "required": ["tab_id", "what"],
+            },
+        },
+        handler=_tool_browser_extract,
+        speak_result=True,
+        slow=True,
     ),
     "news": ToolSpec(
         schema={
@@ -1914,6 +1954,7 @@ SLOW_TOOL_FILLERS = {
     "news": "Ich schaue nach den aktuellen Nachrichten.",
     "instagram_trend": "Ich schaue kurz bei Instagram nach.",
     "research": "Ich recherchiere das kurz.",
+    "browser_extract": "Ich werte die Seite strukturiert aus.",
     "video_analysis": "Ich schaue mir die letzten Videos an.",
     "gmail_check": "Ich schaue kurz ins Postfach.",
     "whatsapp_check": "Ich schaue kurz bei WhatsApp nach.",
