@@ -128,6 +128,19 @@ async def run_claude_code_with_commit(task: str, timeout: int = DEFAULT_TIMEOUT)
             pass
         _log(f"TIMEOUT nach {timeout}s: {task[:200]}")
         return f"ERROR: Claude Code Aufgabe hat das Zeitlimit ({timeout}s) ueberschritten.", None
+    except asyncio.CancelledError:
+        # Defensiv fuer den Fall, dass diese Coroutine von AUSSEN abgebrochen
+        # wird (z.B. ein aeusserer Timeout/Watchdog) BEVOR unser eigener
+        # TimeoutError-Block oben greifen konnte -- ohne das hier wuerde der
+        # claude-Unterprozess verwaist im Hintergrund weiterlaufen,
+        # moeglicherweise mitten in einem Git-Commit. CancelledError NICHT
+        # verschlucken, nur aufraeumen und normal weiterreichen.
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        _log(f"ABGEBROCHEN (von aussen, z.B. Watchdog): {task[:200]}")
+        raise
     except Exception as e:
         _log(f"FEHLER beim Start: {e}")
         return f"ERROR: Claude Code konnte nicht gestartet werden: {e}", None

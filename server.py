@@ -191,6 +191,7 @@ AUSNAHMEN VON EIGENINITIATIVE — bewusst NICHT vollstaendig automatisch, aus gu
 - SCREENCLICK/SCREENTYPE bei REVERSIBLEN Aktionen (navigieren, oeffnen, ausklappen, durch eine Seite/App bewegen, ein Suchfeld ausfuellen): darfst du WAEHREND eines laufenden Gespraechs selbststaendig nutzen, genau wie RESEARCH/INSTAGRAM/etc. — Ahmad hat das 2026-08-07 ausdruecklich erlaubt (kein Banking/Zahlungsverkehr auf diesem Mac), muss es also nicht mehr jedes Mal einzeln ansagen. Trotzdem NIEMALS im Hintergrund ohne laufendes Gespraech.
 - SCREENCLICK/SCREENTYPE bei IRREVERSIBLEN Aktionen (Senden/Abschicken, Loeschen, Bestaetigen, Kaufen/Abonnieren — alles was etwas nach aussen sichtbar macht, Daten zerstoert, oder eine Zahlung/Bestellung/Vertrag abschliesst): NUR wenn Ahmad es GERADE JETZT explizit sagt, ODER du fragst kurz nach und er stimmt zu — niemals automatisch durchklicken, auch nicht mitten in einer sonst selbststaendigen Aufgabe. Ein Fehlklick hier ist nicht rueckgaengig zu machen wie ein Software-Fehler.
 - READCHAT (fremde Chats lesen): Nutze das NUR wenn Ahmad JETZT im Gespraech konkret nach einer bestimmten Person/einem bestimmten Chat fragt. NIEMALS von dir aus oder im Hintergrund private Chats mit anderen Menschen (Familie, Freunde, Partnerin) durchsuchen oder "im Auge behalten" — das sind nicht nur Ahmads Nachrichten, sondern auch die der anderen Person, die davon nichts weiss. Jerome (geschaeftlich) und der eigene Insights-Chat sind die einzigen Chats, die eigenstaendig im Hintergrund gelesen werden, und auch die nur fuer ihren klar definierten Zweck.
+- SELBST GEBAUTE WERKZEUGE MIT ECHTEM SEITENEFFEKT (Ahmad, 2026-08-10, "damit er eigenstaendiger wird" — Jarvis darf sich im Hintergrund selbst neue Faehigkeiten geben, siehe skill_growth_pass): meldet ein frisch selbst gebautes Werkzeug beim Aufruf, dass es Ahmads Bestaetigung braucht bevor es wirklich etwas Reales ausloest, erklaere ihm GENAU was passieren wuerde und frag ausdruecklich nach. Ruf das Werkzeug NIEMALS von dir aus ein zweites Mal mit confirmed=true auf, ohne dass Ahmad das gerade wirklich bestaetigt hat — auch nicht wenn er nur allgemein zustimmend klingt. Nach seinem klaren Ja darfst du es normal aufrufen, ab dann laeuft es ohne weitere Rueckfrage.
 
 ZEIG ES MIR: Wenn du (live per VIDEOANALYSIS/INSTAGRAM oder aus dem Hintergrund-Wissen oben) ein Video oder einen Account findest, den Ahmad sich wirklich ansehen sollte (ungewoehnlich gut performend, ein starker Trend, ein Konkurrenz-Highlight) — sag ihm das nicht nur, OEFFNE es ihm direkt im echten sichtbaren Chrome mit [ACTION:OPEN] (die Instagram-URL). Er will es sehen, nicht nur eine Beschreibung hoeren. Das GILT GENAUSO fuer Vergleichs-/Rechercheaufgaben (z.B. "such mir den besten X", "was ist die beste Option fuer..."): keine rohe Liste aus fuenf Links vorlesen — mit [ACTION:SEARCH] mehrere Quellen pruefen, die tatsaechlich beste Option anhand der wirklich relevanten Kriterien bestimmen, sie DIREKT mit [ACTION:OPEN] aufmachen, und in einem knappen Satz sagen warum sie gewonnen hat. Ergebnis zeigen statt nur beschreiben.
 
@@ -955,6 +956,22 @@ async def _tool_self_improve_log(args: dict) -> str:
     return "\n".join(lines)
 
 
+async def _tool_skill_growth_log(args: dict) -> str:
+    """On-demand Gegenstueck zum stillen Morgen-Briefing-Hinweis
+    (background_brain.py's skill_growth_pass): explizite Nachfrage nach dem,
+    was Jarvis sich zuletzt SELBST an neuen Faehigkeiten gegeben hat (nicht
+    zu verwechseln mit self_improve_log, das sind Fehlerbehebungen)."""
+    hours = args.get("hours", 24)
+    entries = memory.get_recent_skill_growth_entries(hours)
+    if not entries:
+        return f"In den letzten {hours} Stunden hat sich Jarvis keine neue Faehigkeit selbst gegeben."
+    lines = []
+    for e in entries:
+        commit = f" (Commit {e['commit_hash']})" if e.get("commit_hash") else ""
+        lines.append(f"[{e['timestamp']}] Anlass: {e['gap_or_idea']}{commit} -> {e['result']}")
+    return "\n".join(lines)
+
+
 # Sicherheitsgrenze: Subagenten laufen OHNE Rueckfrage-Moeglichkeit bei Ahmad
 # (das ist der Zweck von delegate_subagents/simulate_decision), duerfen darum
 # NICHTS tun das eine andere echte Person erreicht, Ahmads echtes Geraet/
@@ -1605,6 +1622,25 @@ TOOL_REGISTRY: dict = {
             },
         },
         handler=_tool_self_improve_log,
+        speak_result=True,
+    ),
+    "skill_growth_log": ToolSpec(
+        schema={
+            "name": "skill_growth_log",
+            "description": (
+                "Zeigt welche neuen Faehigkeiten Jarvis sich zuletzt SELBST gegeben hat (nicht "
+                "Fehlerbehebungen, siehe self_improve_log dafuer). Nutze das bei Nachfragen wie "
+                "'was hast du dir zuletzt selbst beigebracht' oder 'welche neuen Skills hast du dir gegeben'."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "hours": {"type": "integer", "description": "Zeitraum in Stunden, Default 24."},
+                },
+                "required": [],
+            },
+        },
+        handler=_tool_skill_growth_log,
         speak_result=True,
     ),
     "delegate_subagents": ToolSpec(

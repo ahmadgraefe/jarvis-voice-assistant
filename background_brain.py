@@ -44,6 +44,7 @@ import slt_bio_tools
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 CLAUDE_CODE_STATE_PATH = os.path.join(os.path.dirname(__file__), "memory", "claude_code_scan_state.json")
+SKILL_GROWTH_SCAN_STATE_PATH = os.path.join(os.path.dirname(__file__), "memory", "skill_growth_scan_state.json")
 
 # Server (2026-08-10): ~/Library/Logs existiert auf dem Linux-Server nicht,
 # _log() (siehe unten) hat das bisher still ueber `except OSError: pass`
@@ -70,6 +71,12 @@ SELF_IMPROVE_INTERVAL_SECONDS = 30 * 60       # Ahmad (2026-08-06): "er soll IMM
                                                 # own fast dedicated cadence, decoupled from the slower
                                                 # business cycle. Cheap when idle: it's a no-op unless a
                                                 # genuinely NEW error line showed up since the last scan.
+
+SKILL_GROWTH_INTERVAL_SECONDS = 30 * 60        # Ahmad (2026-08-10): "ich brauche es, damit er eigenstaendiger
+                                                # wird" — reaktiver Zweig (Luecken-Scan) im selben schnellen
+                                                # Takt wie Self-Improve.
+SKILL_GROWTH_IDEA_INTERVAL_SECONDS = 6 * 60 * 60  # eigener-Ideen-Zweig bewusst SELTENER als der reaktive —
+                                                # spekulativer und riskanter (Ahmads eigene Einschaetzung).
 
 CALENDAR_CHECK_INTERVAL_SECONDS = 3 * 60 * 60  # Terminkonflikte sind selten, aber
 # zeitkritisch genug fuer mehr als den 6h-Business-Takt. Aendert NICHTS am
@@ -1076,6 +1083,186 @@ def _get_luna_vale_knowledge() -> str:
     if live_updates:
         base += f"\n\n## Live von Ahmad ergaenzt (waehrend Gespraechen)\n{live_updates}"
     return base
+
+
+def _read_skill_growth_state() -> dict:
+    try:
+        with open(SKILL_GROWTH_SCAN_STATE_PATH) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_skill_growth_state(state: dict):
+    with open(SKILL_GROWTH_SCAN_STATE_PATH, "w") as f:
+        json.dump(state, f)
+
+
+def _recent_history_since(cursor_epoch: float, max_turns: int = 60) -> str:
+    """memory.get_recent_history() ist rein zahlenbasiert (letzte N Zuege),
+    kein Zeitfilter — hier manuell auf alles NACH dem letzten Scan-Cursor
+    eingrenzen, damit derselbe alte Gespraechsausschnitt nicht bei jedem
+    30-Min-Tick erneut als 'Luecke' auftaucht, bis er aus dem N-Fenster
+    herausgerutscht ist."""
+    raw = memory.get_recent_history(max_turns=max_turns)
+    if not raw:
+        return ""
+    kept = []
+    for line in raw.split("\n"):
+        try:
+            ts = time.strptime(line[1:20], "%Y-%m-%d %H:%M:%S")
+            epoch = time.mktime(ts)
+        except (ValueError, IndexError):
+            kept.append(line)  # kann nicht geparst werden -> sicherheitshalber behalten
+            continue
+        if epoch > cursor_epoch:
+            kept.append(line)
+    return "\n".join(kept)
+
+
+async def _find_capability_gap(config: dict, conversation_excerpt: str) -> str:
+    """Reaktiver Zweig: ehrliches 'nichts gefunden' ist der Normalfall, genau
+    wie ueberall sonst in diesem Projekt (kein Erfinden von Luecken)."""
+    if not conversation_excerpt.strip():
+        return ""
+    try:
+        client = anthropic.AsyncAnthropic(api_key=config["anthropic_api_key"])
+        try:
+            response = await client.messages.create(
+                model="claude-haiku-4-5-20251001", max_tokens=150,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "Hier ist ein Ausschnitt aus Ahmads juengster Konversation mit Jarvis:\n\n"
+                        + conversation_excerpt[-4000:] +
+                        "\n\nWollte Ahmad hier erkennbar etwas, das Jarvis NICHT konnte oder wofuer "
+                        "kein Werkzeug existierte (z.B. 'das kann ich nicht', 'dafuer habe ich kein "
+                        "Werkzeug')? Falls ja: beschreibe die fehlende Faehigkeit in EINEM knappen "
+                        "Satz auf Deutsch. Falls nicht klar erkennbar, antworte EXAKT KEINE_LUECKE."
+                    ),
+                }],
+            )
+        finally:
+            await client.close()
+        text = "\n".join(b.text for b in response.content if b.type == "text").strip()
+    except Exception as e:
+        _log(f"FEHLER beim Luecken-Scan: {_exc(e)}")
+        return ""
+    if not text or "KEINE_LUECKE" in text:
+        return ""
+    return text
+
+
+async def _propose_skill_idea(config: dict) -> str:
+    """Eigene-Ideen-Zweig: bewusst zurueckhaltend formuliert ('nur eine
+    wirklich naheliegende Idee, keine Spekulation') und seltener getaktet
+    als der reaktive Zweig, siehe SKILL_GROWTH_IDEA_INTERVAL_SECONDS."""
+    knowledge = _get_luna_vale_knowledge()[:3000]
+    researched = memory.get_knowledge(max_chars=2000)
+    try:
+        client = anthropic.AsyncAnthropic(api_key=config["anthropic_api_key"])
+        try:
+            response = await client.messages.create(
+                model="claude-haiku-4-5-20251001", max_tokens=150,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "Das ist Jarvis' Geschaeftswissen und selbst recherchiertes Wissen:\n\n"
+                        f"{knowledge}\n\n{researched}\n\n"
+                        "Basierend NUR darauf: gibt es eine konkrete, klar umrissene neue Faehigkeit "
+                        "(ein einzelnes Werkzeug), die Jarvis sich sinnvollerweise selbst bauen sollte? "
+                        "Nur eine wirklich naheliegende, gut begruendete Idee, keine Spekulation und "
+                        "nichts das schon offensichtlich existiert. Falls nichts Klares, antworte "
+                        "EXAKT KEINE_IDEE."
+                    ),
+                }],
+            )
+        finally:
+            await client.close()
+        text = "\n".join(b.text for b in response.content if b.type == "text").strip()
+    except Exception as e:
+        _log(f"FEHLER beim Ideen-Vorschlag: {_exc(e)}")
+        return ""
+    if not text or "KEINE_IDEE" in text:
+        return ""
+    return text
+
+
+async def skill_growth_pass(config: dict):
+    """Ahmad (2026-08-10): "ich brauche es, damit er eigenstaendiger wird" —
+    ausdrueckliche Erlaubnis, dass Jarvis sich selbst neue TOOL_REGISTRY-
+    Eintraege gibt, nicht nur Fehler behebt (siehe self_improve_pass oben,
+    gleicher sichere Baumechanismus: claude_code_tool ueber Git, keine
+    separate unauthentifizierte Laufzeitumgebung). Reaktiv (Luecken-Scan,
+    jeder Tick) UND eigene Ideen (viel seltener, siehe
+    SKILL_GROWTH_IDEA_INTERVAL_SECONDS) — Ahmads eigene Wahl bei der
+    Rueckfrage, mit Tageslimit dagegen dass das ausufert."""
+    state = _read_skill_growth_state()
+    now_epoch = time.time()
+    scan_cursor = state.get("last_scan_epoch", now_epoch - SKILL_GROWTH_INTERVAL_SECONDS)
+    idea_cursor = state.get("last_idea_epoch", 0)
+
+    if memory.get_skill_builds_today() >= memory.MAX_SKILL_BUILDS_PER_DAY:
+        _log("Skill-Growth: Tageslimit bereits erreicht, ueberspringe.")
+        state["last_scan_epoch"] = now_epoch
+        _write_skill_growth_state(state)
+        return
+
+    gap_or_idea = await _find_capability_gap(config, _recent_history_since(scan_cursor))
+    source = "Luecke"
+
+    if not gap_or_idea and now_epoch - idea_cursor >= SKILL_GROWTH_IDEA_INTERVAL_SECONDS:
+        gap_or_idea = await _propose_skill_idea(config)
+        source = "eigene Idee"
+        state["last_idea_epoch"] = now_epoch
+
+    state["last_scan_epoch"] = now_epoch
+    _write_skill_growth_state(state)
+
+    if not gap_or_idea:
+        _log("Skill-Growth: keine Luecke und keine Idee diesen Tick.")
+        return
+
+    _log(f"Skill-Growth ({source}): {gap_or_idea[:150]} — delegiere an Claude Code.")
+    task = (
+        f"Jarvis (dieses Projekt) fehlt folgende Faehigkeit: {gap_or_idea}\n\n"
+        "Pruefe ZUERST per grep in server.py's TOOL_REGISTRY ob es dafuer schon ein Werkzeug "
+        "gibt (auch unter anderem Namen) -- falls ja, aendere NICHTS und beschreibe das "
+        "stattdessen.\n\n"
+        "Falls nicht: baue ein neues Werkzeug nach dem etablierten Muster in server.py "
+        "(ToolSpec-Dataclass, TOOL_REGISTRY-Dict, siehe z.B. den Eintrag 'browser_extract' als "
+        "Vorlage) -- Handler-Funktion + Schema-Eintrag, deutsche Beschreibung, ehrliche "
+        "Fehlerbehandlung statt erfundener Werte.\n\n"
+        "WICHTIG -- falls dieses Werkzeug etwas WIRKLICH REALES ausloesen koennte (Nachricht "
+        "senden, Kalender/Geld/Kauf/oeffentlich sichtbare Aktion): baue einen "
+        "'confirmed: bool'-Parameter (optional, im input_schema NICHT als required) ein. Der "
+        "Handler ruft VOR der eigentlichen Aktion memory.is_self_built_skill_confirmed(name) "
+        "auf -- ist das False UND wurde confirmed nicht als True uebergeben, fuehre NICHTS aus, "
+        "gib stattdessen eine Nachricht zurueck die genau erklaert was passieren wuerde und dass "
+        "Ahmads ausdrueckliche Bestaetigung noetig ist, bevor es wirklich passiert. Erst wenn "
+        "confirmed=True hereinkommt, fuehre die Aktion aus und rufe danach EINMALIG "
+        "memory.mark_self_built_skill_confirmed(name) auf, danach laeuft es automatisch. Nutze "
+        "GENAU diese beiden schon vorhandenen memory.py-Funktionen, erfinde keinen eigenen "
+        "Bestaetigungs-Mechanismus. Rein lesende/harmlose Werkzeuge brauchen dieses Gate NICHT.\n\n"
+        "Pruefe am Ende mit 'python3 -m py_compile server.py' dass alles syntaktisch sauber ist. "
+        "Fasse in 2-3 Saetzen auf Deutsch zusammen was du gebaut oder herausgefunden hast."
+    )
+    result, commit_hash = await claude_code_tool.run_claude_code_with_commit(task, timeout=600)
+    _log(f"Skill-Growth Ergebnis: {result[:300]}")
+    memory.add_skill_growth_entry(gap_or_idea, result, commit_hash)
+
+    if commit_hash:
+        memory.increment_skill_builds_today()
+        if IS_SERVER:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "systemctl", "restart", "jarvis-server",
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.communicate()
+                _log(f"Skill-Growth: jarvis-server neu gestartet (neues Werkzeug aus Commit {commit_hash}).")
+            except Exception as e:
+                _log(f"Skill-Growth: Neustart nach neuem Werkzeug fehlgeschlagen: {_exc(e)}")
 
 
 async def _determine_virality_factor(client: anthropic.AsyncAnthropic, account: str, row: dict) -> dict:
@@ -2186,6 +2373,7 @@ async def morning_briefing_pass(config: dict):
 
     open_qs = memory.get_open_questions()
     self_improve_note = memory.format_recent_self_improve_summary(hours=24)
+    skill_growth_note = memory.format_recent_skill_growth_summary(hours=24)
 
     parts = ["Guten Morgen! Kurzer Ueberblick zum Start:"]
     if open_qs:
@@ -2194,6 +2382,8 @@ async def morning_briefing_pass(config: dict):
         parts.append("Keine offenen Fragen gerade.")
     if self_improve_note:
         parts.append(self_improve_note)
+    if skill_growth_note:
+        parts.append(skill_growth_note)
     message = " ".join(parts)
 
     memory.mark_morning_briefing_done()
@@ -2267,6 +2457,7 @@ async def main():
     last_business = timers.get("business", 0)
     last_research = timers.get("research", 0)
     last_self_improve = timers.get("self_improve", 0)
+    last_skill_growth = timers.get("skill_growth", 0)
     last_jerome = timers.get("jerome", 0)
     last_deep_analysis = timers.get("deep_analysis", 0)
     last_insights_inbox = timers.get("insights_inbox", 0)
@@ -2419,9 +2610,26 @@ async def main():
         # Fehlersuche gehen") — losgeloest vom langsameren Business-Zyklus,
         # damit ein neuer Fehler nicht erst Stunden spaeter auffaellt.
         if now - last_self_improve >= SELF_IMPROVE_INTERVAL_SECONDS:
-            await _run_pass_safely("Self-Improve", config, self_improve_pass(config))
+            # Laengerer Timeout als der Standard-Watchdog-Deckel (180s): dieser
+            # Pass ruft claude_code_tool.run_claude_code_with_commit() auf,
+            # dessen EIGENES Timeout bei 600s liegt. Mit dem Standard-Deckel
+            # wuerde der aeussere Watchdog per CancelledError abbrechen, BEVOR
+            # run_claude_code's eigener except-Block (der den Subprozess
+            # sauber killt) je greift -- der claude-Unterprozess koennte
+            # dadurch verwaist im Hintergrund weiterlaufen, moeglicherweise
+            # mitten in einem Git-Commit. 650s liegt bewusst ueber den 600s,
+            # damit IMMER der innere Timeout zuerst feuert.
+            await _run_pass_safely("Self-Improve", config, self_improve_pass(config), timeout=650)
             last_self_improve = now
             _save_timer("self_improve", now)
+
+        # Ahmad (2026-08-10): "ich brauche es, damit er eigenstaendiger wird" —
+        # gleicher Takt und derselbe laengere Timeout-Grund wie Self-Improve
+        # direkt darueber (ruft ebenfalls claude_code_tool auf).
+        if now - last_skill_growth >= SKILL_GROWTH_INTERVAL_SECONDS:
+            await _run_pass_safely("Skill-Growth", config, skill_growth_pass(config), timeout=650)
+            last_skill_growth = now
+            _save_timer("skill_growth", now)
 
         # Credit/billing-error alert — deduped so a genuinely exhausted key
         # (which would otherwise fail EVERY pass, EVERY tick) sends ONE clear

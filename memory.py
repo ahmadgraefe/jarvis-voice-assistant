@@ -507,6 +507,114 @@ def format_recent_self_improve_summary(hours: int = 24) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Skill-Growth (Ahmad, 2026-08-10: "ich brauche es, damit er eigenstaendiger
+# wird") — skill_growth_pass in background_brain.py laesst Claude Code
+# gezielt NEUE Werkzeuge bauen (nicht nur Fehler fixen wie Self-Improve
+# oben), reaktiv auf beobachtete Luecken oder eigene Ideen. Gleiches
+# Sichtbarkeits-Prinzip wie beim Self-Improve-Changelog: still im laufenden
+# Chat, aber nachvollziehbar im Morgen-Briefing / auf Nachfrage.
+# ---------------------------------------------------------------------------
+
+SKILL_GROWTH_CHANGELOG_PATH = os.path.join(MEMORY_DIR, "skill_growth_changelog.jsonl")
+SKILL_GROWTH_STATE_PATH = os.path.join(MEMORY_DIR, "skill_growth_state.json")
+SELF_BUILT_SKILLS_PATH = os.path.join(MEMORY_DIR, "self_built_skills_confirmed.json")
+
+MAX_SKILL_BUILDS_PER_DAY = 2  # bewusst niedrig gegen unkontrolliertes Wachstum
+
+
+def add_skill_growth_entry(gap_or_idea: str, result: str, commit_hash: str = None):
+    try:
+        entry = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "epoch": time.time(),
+            "gap_or_idea": gap_or_idea[:500],
+            "result": result[:1000],
+            "commit_hash": commit_hash,
+        }
+        with open(SKILL_GROWTH_CHANGELOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def get_recent_skill_growth_entries(hours: int = 24) -> list:
+    if not os.path.exists(SKILL_GROWTH_CHANGELOG_PATH):
+        return []
+    cutoff = time.time() - hours * 3600
+    entries = []
+    with open(SKILL_GROWTH_CHANGELOG_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("epoch", 0) >= cutoff:
+                entries.append(entry)
+    return entries
+
+
+def format_recent_skill_growth_summary(hours: int = 24) -> str:
+    """Ein knapper Satz fuers Morgen-Briefing, leer wenn nichts passiert ist."""
+    entries = get_recent_skill_growth_entries(hours)
+    if not entries:
+        return ""
+    if len(entries) == 1:
+        return f"Jarvis hat sich selbst eine neue Faehigkeit gegeben: {entries[0]['result'][:150]}"
+    return f"Jarvis hat sich selbst {len(entries)} neue Faehigkeiten gegeben, zuletzt: {entries[-1]['result'][:150]}"
+
+
+def get_skill_builds_today() -> int:
+    """Tageslimit-Zaehler (MAX_SKILL_BUILDS_PER_DAY) — resettet sich selbst
+    bei Datumswechsel, indem ein alter Stand einfach als 0 gilt."""
+    if not os.path.exists(SKILL_GROWTH_STATE_PATH):
+        return 0
+    try:
+        with open(SKILL_GROWTH_STATE_PATH) as f:
+            state = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return 0
+    if state.get("date") != time.strftime("%Y-%m-%d"):
+        return 0
+    return state.get("builds_today", 0)
+
+
+def increment_skill_builds_today():
+    today = time.strftime("%Y-%m-%d")
+    current = get_skill_builds_today()  # bereits datumsbewusst (0 bei neuem Tag)
+    with open(SKILL_GROWTH_STATE_PATH, "w") as f:
+        json.dump({"date": today, "builds_today": current + 1}, f)
+
+
+def is_self_built_skill_confirmed(tool_name: str) -> bool:
+    """Bestaetigungs-Gate fuer selbst gebaute Werkzeuge mit echtem
+    Seiteneffekt (Nachricht senden, Kalender, Geld, Kauf) — von
+    GENERIERTEM Tool-Code aus server.py aufgerufen, siehe skill_growth_pass'
+    Task-Prompt in background_brain.py. Erste echte Nutzung braucht Ahmads
+    ausdrueckliche Bestaetigung, danach laeuft es automatisch."""
+    if not os.path.exists(SELF_BUILT_SKILLS_PATH):
+        return False
+    try:
+        with open(SELF_BUILT_SKILLS_PATH) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(data.get(tool_name))
+
+
+def mark_self_built_skill_confirmed(tool_name: str):
+    data = {}
+    if os.path.exists(SELF_BUILT_SKILLS_PATH):
+        try:
+            with open(SELF_BUILT_SKILLS_PATH) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            data = {}
+    data[tool_name] = {"confirmed_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    with open(SELF_BUILT_SKILLS_PATH, "w") as f:
+        json.dump(data, f)
+
+
+# ---------------------------------------------------------------------------
 # Knowledge base — durable facts Jarvis researched/collected himself in the
 # background (algorithm changes, niche trends, business insights). Separate
 # from memory.md (which is conversation-derived) so autonomous research
