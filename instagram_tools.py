@@ -24,7 +24,11 @@ SNAPSHOTS_PATH = os.path.join(os.path.dirname(__file__), "memory", "instagram_sn
 TRACKED_LINKS_PATH = os.path.join(os.path.dirname(__file__), "memory", "tracked_links.jsonl")
 LINK_SNAPSHOTS_PATH = os.path.join(os.path.dirname(__file__), "memory", "link_snapshots.jsonl")
 VIDEO_ANALYSIS_PATH = os.path.join(os.path.dirname(__file__), "memory", "video_analysis.jsonl")
-LOG_PATH = os.path.expanduser("~/Library/Logs/jarvis-instagram.log")
+# Server (2026-08-10): ~/Library/Logs existiert auf dem Linux-Server nicht.
+LOG_PATH = (
+    "/var/log/jarvis-instagram.log" if os.environ.get("JARVIS_ROLE") == "server"
+    else os.path.expanduser("~/Library/Logs/jarvis-instagram.log")
+)
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 os.makedirs(os.path.dirname(SNAPSHOTS_PATH), exist_ok=True)
@@ -118,6 +122,36 @@ async def _get_context():
         storage = SESSION_PATH if os.path.exists(SESSION_PATH) else None
         _context = await _browser.new_context(storage_state=storage, user_agent=UA, locale="de-DE")
     return _context
+
+
+def reset_browser():
+    """Roadmap Punkt 21 — nach einem Watchdog-Timeout (background_brain.py,
+    _run_pass_safely) die Modul-Singletons verwerfen statt eine womoeglich
+    kaputte Instanz weiterzuverwenden. Setzt SOFORT synchron auf None, damit
+    der naechste _get_context()-Aufruf sicher neu startet, und schliesst die
+    alte Instanz nur best effort im Hintergrund (ein await hier koennte
+    selbst haengen, wenn die Session wirklich tot ist)."""
+    global _playwright, _browser, _context
+    old_browser, old_playwright = _browser, _playwright
+    _playwright, _browser, _context = None, None, None
+    if old_browser is None:
+        return
+
+    async def _cleanup():
+        try:
+            await asyncio.wait_for(old_browser.close(), timeout=10)
+        except Exception:
+            pass
+        if old_playwright is not None:
+            try:
+                await asyncio.wait_for(old_playwright.stop(), timeout=10)
+            except Exception:
+                pass
+
+    try:
+        asyncio.get_event_loop().create_task(_cleanup())
+    except RuntimeError:
+        pass
 
 
 async def _screenshot(page, timeout: float = 15000, attempts: int = 2) -> bytes:

@@ -453,6 +453,60 @@ def resolve_live_events(ids: list, status: str):
 
 
 # ---------------------------------------------------------------------------
+# Self-Improve-Changelog (Roadmap Punkt 22) — self_improve_pass in
+# background_brain.py laesst Claude Code unsupervised Fehler fixen, das
+# Ergebnis war bisher nur in einer Log-Datei sichtbar (bewusst still im
+# laufenden Chat, siehe Kommentar dort). Dieses Log macht es NACHTRAEGLICH
+# nachvollziehbar (morgens im Briefing, oder auf explizite Nachfrage), ohne
+# den laufenden Chat zu unterbrechen.
+# ---------------------------------------------------------------------------
+
+SELF_IMPROVE_CHANGELOG_PATH = os.path.join(MEMORY_DIR, "self_improve_changelog.jsonl")
+
+
+def add_self_improve_entry(errors_summary: str, result: str, commit_hash: str = None):
+    try:
+        entry = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "epoch": time.time(),
+            "errors_summary": errors_summary[:500],
+            "result": result[:1000],
+            "commit_hash": commit_hash,
+        }
+        with open(SELF_IMPROVE_CHANGELOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def get_recent_self_improve_entries(hours: int = 24) -> list:
+    if not os.path.exists(SELF_IMPROVE_CHANGELOG_PATH):
+        return []
+    cutoff = time.time() - hours * 3600
+    entries = []
+    with open(SELF_IMPROVE_CHANGELOG_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("epoch", 0) >= cutoff:
+                entries.append(entry)
+    return entries
+
+
+def format_recent_self_improve_summary(hours: int = 24) -> str:
+    """Ein knapper Satz fuers Morgen-Briefing (Roadmap Punkt 6), leer wenn
+    nichts passiert ist — bleibt so still, wenn es nichts zu berichten gibt."""
+    entries = get_recent_self_improve_entries(hours)
+    if not entries:
+        return ""
+    if len(entries) == 1:
+        return f"Nachts hat sich Jarvis selbst um einen Fehler gekuemmert: {entries[0]['result'][:150]}"
+    return f"Nachts hat sich Jarvis selbststaendig um {len(entries)} Fehler gekuemmert, zuletzt: {entries[-1]['result'][:150]}"
+
+
+# ---------------------------------------------------------------------------
 # Knowledge base — durable facts Jarvis researched/collected himself in the
 # background (algorithm changes, niche trends, business insights). Separate
 # from memory.md (which is conversation-derived) so autonomous research
@@ -528,6 +582,31 @@ def mark_daily_summary_done():
         except (json.JSONDecodeError, OSError):
             state = {}
     state["last_daily_summary_date"] = time.strftime("%Y-%m-%d")
+    with open(BRIEFING_STATE_PATH, "w") as f:
+        json.dump(state, f)
+
+
+def has_morning_briefing_today() -> bool:
+    """Roadmap Punkt 6 — Gegenstueck zu has_daily_summary_today(), gleiches Muster."""
+    if not os.path.exists(BRIEFING_STATE_PATH):
+        return False
+    try:
+        with open(BRIEFING_STATE_PATH) as f:
+            state = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return False
+    return state.get("last_morning_briefing_date") == time.strftime("%Y-%m-%d")
+
+
+def mark_morning_briefing_done():
+    state = {}
+    if os.path.exists(BRIEFING_STATE_PATH):
+        try:
+            with open(BRIEFING_STATE_PATH) as f:
+                state = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            state = {}
+    state["last_morning_briefing_date"] = time.strftime("%Y-%m-%d")
     with open(BRIEFING_STATE_PATH, "w") as f:
         json.dump(state, f)
 

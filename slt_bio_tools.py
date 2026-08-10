@@ -15,7 +15,11 @@ from collections import defaultdict
 import httpx
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
-LOG_PATH = os.path.expanduser("~/Library/Logs/jarvis-sltbio.log")
+# Server (2026-08-10): ~/Library/Logs existiert auf dem Linux-Server nicht.
+LOG_PATH = (
+    "/var/log/jarvis-sltbio.log" if os.environ.get("JARVIS_ROLE") == "server"
+    else os.path.expanduser("~/Library/Logs/jarvis-sltbio.log")
+)
 BASE_URL = "https://api.slt.bio"
 
 # Documented: 60 requests/hour per key. A snapshot pass makes at most 2 calls

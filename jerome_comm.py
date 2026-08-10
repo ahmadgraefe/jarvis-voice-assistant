@@ -22,7 +22,11 @@ import whatsapp_tools
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 LUNA_VALE_STATUS_PATH = os.path.join(os.path.dirname(__file__), "claude_app_status.md")
-LOG_PATH = os.path.expanduser("~/Library/Logs/jarvis-jerome.log")
+# Server (2026-08-10): ~/Library/Logs existiert auf dem Linux-Server nicht.
+LOG_PATH = (
+    "/var/log/jarvis-jerome.log" if os.environ.get("JARVIS_ROLE") == "server"
+    else os.path.expanduser("~/Library/Logs/jarvis-jerome.log")
+)
 NOTIFIED_PATH = os.path.join(os.path.dirname(__file__), "memory", "jerome_notified_videos.json")
 LAST_REPLY_PATH = os.path.join(os.path.dirname(__file__), "memory", "jerome_last_reply.json")
 WAVE_CREATED_PATH = os.path.join(os.path.dirname(__file__), "memory", "trial_wave_created_at.json")

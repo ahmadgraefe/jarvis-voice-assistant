@@ -14,12 +14,14 @@ import asyncio
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
 
 import anthropic
+import httpx
 
 import app_control
 import calendar_tools
@@ -42,12 +44,24 @@ import slt_bio_tools
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 CLAUDE_CODE_STATE_PATH = os.path.join(os.path.dirname(__file__), "memory", "claude_code_scan_state.json")
+
+# Server (2026-08-10): ~/Library/Logs existiert auf dem Linux-Server nicht,
+# _log() (siehe unten) hat das bisher still ueber `except OSError: pass`
+# verschluckt — jede FEHLER-Zeile in diesem Modul (und in fanplace.py,
+# instagram_tools.py, research.py, jerome_comm.py, content_strategy.py,
+# screen_control.py, slt_bio_tools.py, gleiches Muster dort) ging seit der
+# Hetzner-Migration ins Leere, inklusive der Fehler die _collect_new_error_lines
+# unten fuer self_improve_pass einsammeln soll. /var/log/jarvis-brain.log und
+# /var/log/jarvis-server.log existieren bereits (systemd StandardOutput/Error),
+# die anderen werden hier neu angelegt.
+IS_SERVER = os.environ.get("JARVIS_ROLE") == "server"
+_LOG_DIR = "/var/log" if IS_SERVER else os.path.expanduser("~/Library/Logs")
 JARVIS_LOGS = [
-    os.path.expanduser("~/Library/Logs/jarvis-brain.log"),
-    os.path.expanduser("~/Library/Logs/jarvis-instagram.log"),
-    os.path.expanduser("~/Library/Logs/jarvis-research.log"),
+    os.path.join(_LOG_DIR, "jarvis-brain.log"),
+    os.path.join(_LOG_DIR, "jarvis-instagram.log"),
+    os.path.join(_LOG_DIR, "jarvis-research.log"),
 ]
-LOG_PATH = os.path.expanduser("~/Library/Logs/jarvis-brain.log")
+LOG_PATH = os.path.join(_LOG_DIR, "jarvis-brain.log")
 
 INSTAGRAM_INTERVAL_SECONDS = 90 * 60          # aggressive cadence, ~every 1.5h
 BUSINESS_CYCLE_INTERVAL_SECONDS = 5 * 60 * 60  # discovery/sheet-sync/video-analysis/trial-reel
@@ -94,11 +108,20 @@ JEROME_WORK_HOUR_END = 17
 
 LOOP_TICK_SECONDS = 60
 
+# Roadmap Punkt 21 — jeder Pass ist rein async (kein blockierendes requests/
+# time.sleep, geprueft), asyncio.wait_for kann darum jeden einzelnen Pass
+# sauber unterbrechen statt dass ein Haenger die ganze Schleife einfriert.
+# 3 Minuten ist grosszuegig ueber den langsamsten normalen Passes (Multi-
+# Frame-Vision-Analyse), aber weit unter dem 60s-Tick, sodass ein Haenger
+# nicht stundenlang unbemerkt bleibt.
+PASS_TIMEOUT_SECONDS = 180
+
 CREDIT_ALERT_COOLDOWN_SECONDS = 6 * 3600  # one clear heads-up per ~6h while the issue persists, not every tick
 
 TIMER_STATE_PATH = os.path.join(os.path.dirname(__file__), "memory", "pass_timers.json")
 
 DAILY_SUMMARY_HOUR = 20  # local 24h clock — earliest hour the once-daily end-of-day summary may fire
+MORNING_SUMMARY_HOUR = 7  # Roadmap Punkt 6 — Gegenstueck ohne Doppelklatschen, frueh genug fuer den Start in den Tag
 CONTENT_BRIEF_HOUR = 9   # Jerome needs his tasks early in the day, not at night
 
 FOLLOWER_ALERT_THRESHOLD = 20  # absolute follower delta worth a WhatsApp ping
@@ -233,6 +256,17 @@ async def _alert(config: dict, text: str):
         memory.add_live_event(text)
     except Exception as e:
         _log(f"live_event Warteschlange fehlgeschlagen (ignoriert): {e}")
+
+    # Roadmap Punkt 3 — Event-Bus statt blindem Warten auf den 5-Sekunden-
+    # Datei-Poll von server.py (_live_events_poll_loop dort): direkter Aufruf,
+    # senkt die Zustellzeit im Normalfall auf nahezu sofort. Rein best effort
+    # und mit kurzem Timeout — der Datei-Weg oben bleibt der Fallback, falls
+    # server.py gerade nicht erreichbar ist (z.B. eigener Neustart).
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            await client.post("http://127.0.0.1:8340/internal/push_event", json={"text": text})
+    except Exception:
+        pass
 
     try:
         push_notifications.send_push_to_all("Jarvis", text)
@@ -460,7 +494,7 @@ async def _run_health_check(config: dict) -> str:
 
 
 JARVIS_DIR = os.path.dirname(os.path.abspath(__file__))
-JARVIS_SERVER_LOG = os.path.expanduser("~/Library/Logs/jarvis-server.log")
+JARVIS_SERVER_LOG = os.path.join(_LOG_DIR, "jarvis-server.log")
 
 
 async def _is_server_running() -> bool:
@@ -487,8 +521,25 @@ async def _ensure_server_running_silently():
     Tab verbindet sich ueber seine bestehende Reconnect-Logik (main.js,
     ws.onclose, alle 3s) von selbst neu, sobald der Server antwortet — dann
     kann der Live-Event-Kanal (memory.add_live_event, siehe _alert oben)
-    die Abend-Zusammenfassung sprechen, sobald Ahmad als naechstes hinschaut."""
+    die Abend-Zusammenfassung sprechen, sobald Ahmad als naechstes hinschaut.
+
+    Server (2026-08-10, Roadmap Punkt 21): ein rohes subprocess.Popen wie im
+    Mac-Zweig unten wuerde hier eine zweite, von systemd unverwaltete
+    server.py-Instanz daneben starten (Port-Konflikt bzw. Chaos), weil
+    jarvis-server.service bereits als eigener Dienst laeuft — der richtige
+    Hebel ist systemctl restart, nicht ein neuer Kindprozess."""
     if await _is_server_running():
+        return
+    if IS_SERVER:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "systemctl", "restart", "jarvis-server",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.communicate()
+            _log("jarvis-server.service antwortete nicht, per systemctl neu gestartet.")
+        except Exception as e:
+            _log(f"systemctl-Neustart von jarvis-server fehlgeschlagen: {_exc(e)}")
         return
     try:
         with open(JARVIS_SERVER_LOG, "a") as log_file:
@@ -956,8 +1007,13 @@ async def self_improve_pass(config: dict):
         "das Problem ist. Fasse am Ende in 2-3 Saetzen auf Deutsch zusammen was du getan oder "
         "herausgefunden hast."
     )
-    result = await claude_code_tool.run_claude_code(task)
+    result, commit_hash = await claude_code_tool.run_claude_code_with_commit(task)
     _log(f"Self-Improve Ergebnis: {result[:300]}")
+
+    # Roadmap Punkt 22 — sichtbares Changelog, NACHTRAEGLICH nachvollziehbar
+    # (morgens im Briefing / auf Nachfrage), ohne den laufenden Chat zu
+    # unterbrechen (bleibt bewusst still, siehe Docstring oben).
+    memory.add_self_improve_entry("\n".join(errors[-30:]), result, commit_hash)
 
     await _reflect_on_fix(config, errors, result)
 
@@ -2118,8 +2174,91 @@ async def content_brief_pass(config: dict):
     _log(f"Content-Brief gesendet: {result}")
 
 
+async def morning_briefing_pass(config: dict):
+    """Roadmap Punkt 6 — Gegenstueck zu daily_summary_pass, aber morgens und
+    komplett selbststaendig (kein Doppelklatschen noetig, das war bisher die
+    einzige Quelle fuer ein 'Morgen-Briefing", ueber handle_activate). Once
+    per calendar day, no earlier than MORNING_SUMMARY_HOUR."""
+    if memory.has_morning_briefing_today():
+        return
+    if int(time.strftime("%H")) < MORNING_SUMMARY_HOUR:
+        return
+
+    open_qs = memory.get_open_questions()
+    self_improve_note = memory.format_recent_self_improve_summary(hours=24)
+
+    parts = ["Guten Morgen! Kurzer Ueberblick zum Start:"]
+    if open_qs:
+        parts.append(f"{len(open_qs)} offene Frage(n) warten, allen voran: {open_qs[0]['text']}")
+    else:
+        parts.append("Keine offenen Fragen gerade.")
+    if self_improve_note:
+        parts.append(self_improve_note)
+    message = " ".join(parts)
+
+    memory.mark_morning_briefing_done()
+    await _alert(config, message)
+    _log(f"Morgen-Briefing gesendet: {message[:200]}")
+
+
+def _sd_notify(state: str):
+    """Roadmap Punkt 21 — minimales sd_notify ohne Zusatzpaket (systemd-
+    python/sdnotify sind auf dem Server nicht installiert, das Protokoll ist
+    simpel genug fuer ein paar Zeilen): liest den vom systemd-Unit gesetzten
+    NOTIFY_SOCKET-Pfad und schickt ein AF_UNIX-Datagram. Kein Effekt/Fehler
+    wenn NOTIFY_SOCKET fehlt (z.B. lokal auf dem Mac ohne systemd, oder
+    Type=notify noch nicht in der Unit gesetzt) — rein best effort."""
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    if addr.startswith("@"):
+        addr = "\0" + addr[1:]
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        sock.connect(addr)
+        sock.sendall(state.encode())
+        sock.close()
+    except OSError:
+        pass
+
+
+_BROWSER_RESET_PASSES = {
+    "Instagram-Check", "Fanplace-Check", "Video-Analyse", "Account-Discovery", "Tiefen-Analyse",
+}
+
+
+async def _run_pass_safely(label: str, config: dict, coro, timeout: int = PASS_TIMEOUT_SECONDS):
+    """Roadmap Punkt 21 — Ersatz fuer das nackte try/except um jeden Pass-
+    Aufruf in main(): faengt zusaetzlich einen ECHTEN Haenger ab (kein
+    raised Exception, die Coroutine wird einfach nie fertig), den das
+    urspruengliche try/except strukturell nicht sehen konnte. Gibt den
+    Rueckgabewert des Passes zurueck (fuer Passes wie video_analysis_pass,
+    die einen Zustand zurueckreichen), oder None bei Fehler/Timeout."""
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except asyncio.TimeoutError:
+        _log(f"WATCHDOG: '{label}' hat nach {timeout}s nicht reagiert, abgebrochen.")
+        if label in _BROWSER_RESET_PASSES:
+            try:
+                instagram_tools.reset_browser()
+            except Exception:
+                pass
+            try:
+                fanplace.reset_browser()
+            except Exception:
+                pass
+            _log(f"WATCHDOG: Browser-Sitzungen wegen '{label}' zurueckgesetzt.")
+        await _alert(config, f"⚠️ Jarvis: Hintergrund-Aufgabe '{label}' hat nicht reagiert und wurde abgebrochen.")
+    except Exception as e:
+        _log(f"FEHLER bei {label}: {_exc(e)}")
+    return None
+
+
 async def main():
     _log("Background Brain gestartet.")
+    # Type=notify erwartet READY=1, sobald der Dienst wirklich laeuft, sonst
+    # wertet systemd den Start selbst nach TimeoutStartSec als fehlgeschlagen.
+    _sd_notify("READY=1")
     # Wall-clock, persisted to disk — see _load_timers() for why. 0 (epoch)
     # for any gate never run before, so a genuinely fresh install still runs
     # everything once immediately, same as the old -inf behavior.
@@ -2146,104 +2285,70 @@ async def main():
         config = _load_config()
         now = time.time()
 
+        # Roadmap Punkt 21 — jeder Pass-Aufruf lief bisher in einem nackten
+        # try/except, das eine RAISED Exception faengt, aber einen echten
+        # Haenger (Coroutine wird einfach nie fertig) nicht sieht und die
+        # ganze Schleife dauerhaft einfrieren wuerde. _run_pass_safely()
+        # ersetzt das ueberall durch asyncio.wait_for mit PASS_TIMEOUT_SECONDS.
+
         if now - last_instagram >= INSTAGRAM_INTERVAL_SECONDS:
-            try:
-                await instagram_pass(config)
-            except Exception as e:
-                _log(f"FEHLER beim Instagram-Check: {_exc(e)}")
-
-            try:
-                await fanplace_pass(config)
-            except Exception as e:
-                _log(f"FEHLER beim Fanplace-Check: {_exc(e)}")
-
+            await _run_pass_safely("Instagram-Check", config, instagram_pass(config))
+            await _run_pass_safely("Fanplace-Check", config, fanplace_pass(config))
             last_instagram = now
             _save_timer("instagram", now)
 
         # Eigener, sehr schneller Takt (Ahmad, 2026-08-07: "muss zuegiger gehen") —
         # unabhaengig von allen anderen Zyklen, laeuft immer, keine Arbeitszeit-Gate.
         if now - last_insights_inbox >= INSIGHTS_INBOX_INTERVAL_SECONDS:
-            try:
-                await insights_inbox_pass(config)
-            except Exception as e:
-                _log(f"FEHLER bei Insights-Eingang: {_exc(e)}")
-
+            await _run_pass_safely("Insights-Eingang", config, insights_inbox_pass(config))
             last_insights_inbox = now
             _save_timer("insights_inbox", now)
 
         # Eigener Takt, stuendlich reicht (Ahmad traegt Profile Visits nur woechentlich ein).
         if now - last_link_funnel >= LINK_FUNNEL_INTERVAL_SECONDS:
-            try:
-                await link_funnel_pass(config)
-            except Exception as e:
-                _log(f"FEHLER bei Link Funnel: {_exc(e)}")
-
+            await _run_pass_safely("Link Funnel", config, link_funnel_pass(config))
             last_link_funnel = now
             _save_timer("link_funnel", now)
 
         # Eigener Takt, siehe CALENDAR_CHECK_INTERVAL_SECONDS oben — aendert
         # nichts am Kalender, meldet nur echte Ueberschneidungen.
         if now - last_calendar_check >= CALENDAR_CHECK_INTERVAL_SECONDS:
-            try:
-                await calendar_conflict_pass(config)
-            except Exception as e:
-                _log(f"FEHLER beim Kalender-Konfliktcheck: {_exc(e)}")
-
+            await _run_pass_safely("Kalender-Konfliktcheck", config, calendar_conflict_pass(config))
             last_calendar_check = now
             _save_timer("calendar_check", now)
 
         # Eigener schneller Takt, siehe MEETING_REMINDER_INTERVAL_SECONDS oben —
         # zeitkritisch, keine Arbeitszeit-Gate, aendert nichts am Kalender.
         if now - last_meeting_reminder >= MEETING_REMINDER_INTERVAL_SECONDS:
-            try:
-                await meeting_reminder_pass(config)
-            except Exception as e:
-                _log(f"FEHLER beim Meeting-Reminder: {_exc(e)}")
-
+            await _run_pass_safely("Meeting-Reminder", config, meeting_reminder_pass(config))
             last_meeting_reminder = now
             _save_timer("meeting_reminder", now)
 
         # Eigener Takt, siehe SCREEN_AWARENESS_INTERVAL_SECONDS oben —
         # niedrigfrequent, rein passiv, Roadmap Punkt 19.
         if now - last_screen_awareness >= SCREEN_AWARENESS_INTERVAL_SECONDS:
-            try:
-                await screen_awareness_pass(config)
-            except Exception as e:
-                _log(f"FEHLER bei Screen-Awareness: {_exc(e)}")
-
+            await _run_pass_safely("Screen-Awareness", config, screen_awareness_pass(config))
             last_screen_awareness = now
             _save_timer("screen_awareness", now)
 
         # Eigener Takt, siehe FINANCE_SYNC_INTERVAL_SECONDS oben — Kurs +
         # Fanplace-Payouts + zurueckhaltender Trend-Check.
         if now - last_finance_sync >= FINANCE_SYNC_INTERVAL_SECONDS:
-            try:
-                await finance_sync_pass(config)
-            except Exception as e:
-                _log(f"FEHLER beim Finanz-Sync: {_exc(e)}")
-
+            await _run_pass_safely("Finanz-Sync", config, finance_sync_pass(config))
             last_finance_sync = now
             _save_timer("finance_sync", now)
 
         # Eigener Takt, siehe GMAIL_REPLY_INTERVAL_SECONDS oben — legt nur
         # Entwuerfe an, sendet nie selbst.
         if now - last_gmail_reply >= GMAIL_REPLY_INTERVAL_SECONDS:
-            try:
-                await gmail_reply_pass(config)
-            except Exception as e:
-                _log(f"FEHLER beim Gmail-Reply-Check: {_exc(e)}")
-
+            await _run_pass_safely("Gmail-Reply-Check", config, gmail_reply_pass(config))
             last_gmail_reply = now
             _save_timer("gmail_reply", now)
 
         # Eigener Takt, siehe GOAL_CHECK_INTERVAL_SECONDS oben — aendert
         # keine Ziele, meldet nur bei Stillstand.
         if now - last_goal_check >= GOAL_CHECK_INTERVAL_SECONDS:
-            try:
-                await goal_progress_pass(config)
-            except Exception as e:
-                _log(f"FEHLER beim Ziel-Check: {_exc(e)}")
-
+            await _run_pass_safely("Ziel-Check", config, goal_progress_pass(config))
             last_goal_check = now
             _save_timer("goal_check", now)
 
@@ -2251,21 +2356,13 @@ async def main():
         # siehe MEMORY_CONSOLIDATION_INTERVAL_SECONDS oben, mergt Duplikate im
         # Langzeitgedaechtnis und archiviert alten Gespraechsverlauf, loescht nie destruktiv.
         if now - last_memory_consolidation >= MEMORY_CONSOLIDATION_INTERVAL_SECONDS:
-            try:
-                await memory_consolidation_pass(config)
-            except Exception as e:
-                _log(f"FEHLER bei der Gedaechtnis-Konsolidierung: {_exc(e)}")
-
+            await _run_pass_safely("Gedaechtnis-Konsolidierung", config, memory_consolidation_pass(config))
             last_memory_consolidation = now
             _save_timer("memory_consolidation", now)
 
         # Eigener, langsamer Takt — Multi-Frame-Tiefenanalyse ist teuer, ein paar Mal am Tag reicht.
         if now - last_target_creator >= TARGET_CREATOR_INTERVAL_SECONDS:
-            try:
-                await target_creator_analysis_pass(config)
-            except Exception as e:
-                _log(f"FEHLER bei Target-Creator-Analyse: {_exc(e)}")
-
+            await _run_pass_safely("Target-Creator-Analyse", config, target_creator_analysis_pass(config))
             last_target_creator = now
             _save_timer("target_creator", now)
 
@@ -2275,63 +2372,37 @@ async def main():
         current_hour = int(time.strftime("%H"))
         in_jerome_hours = JEROME_WORK_HOUR_START <= current_hour < JEROME_WORK_HOUR_END
         if in_jerome_hours and now - last_jerome >= JEROME_INTERVAL_SECONDS:
-            try:
-                await jerome_reply_pass(config)
-            except Exception as e:
-                _log(f"FEHLER beim Jerome-Antwort-Check: {_exc(e)}")
-
+            await _run_pass_safely("Jerome-Antwort-Check", config, jerome_reply_pass(config))
             last_jerome = now
             _save_timer("jerome", now)
 
-        try:
-            await daily_summary_pass(config)
-        except Exception as e:
-            _log(f"FEHLER bei der Tages-Zusammenfassung: {_exc(e)}")
-
-        try:
-            await content_brief_pass(config)
-        except Exception as e:
-            _log(f"FEHLER beim Content-Brief: {_exc(e)}")
+        await _run_pass_safely("Tages-Zusammenfassung", config, daily_summary_pass(config))
+        await _run_pass_safely("Morgen-Briefing", config, morning_briefing_pass(config))
+        await _run_pass_safely("Content-Brief", config, content_brief_pass(config))
 
         # Recherche laeuft bewusst auf ihrem EIGENEN, langsameren Takt (1-2x/Tag,
         # Ahmads Wunsch) — losgeloest vom Business-Zyklus unten, der geschaefts-
         # kritische Dinge (virale Videos, Jerome-Trial-Reels) weiter zuegig macht.
         if now - last_research >= RESEARCH_INTERVAL_SECONDS:
-            try:
-                await research_pass(config)
-            except Exception as e:
-                _log(f"FEHLER bei der Recherche: {_exc(e)}")
-
+            await _run_pass_safely("Recherche", config, research_pass(config))
             last_research = now
             _save_timer("research", now)
 
         if now - last_business >= BUSINESS_CYCLE_INTERVAL_SECONDS:
-            try:
-                await discovery_pass(config)
-            except Exception as e:
-                _log(f"FEHLER bei der Account-Discovery: {_exc(e)}")
+            await _run_pass_safely("Account-Discovery", config, discovery_pass(config))
 
             config = _load_config()  # discovery_pass may have grown competitor_accounts
 
-            try:
-                await sheets_sync_pass(config)
-            except Exception as e:
-                _log(f"FEHLER beim Sheet-Sync: {_exc(e)}")
+            await _run_pass_safely("Sheet-Sync", config, sheets_sync_pass(config))
 
-            try:
-                video_rotation_index = await video_analysis_pass(config, video_rotation_index)
-            except Exception as e:
-                _log(f"FEHLER bei der Video-Analyse: {_exc(e)}")
+            result = await _run_pass_safely(
+                "Video-Analyse", config, video_analysis_pass(config, video_rotation_index)
+            )
+            if result is not None:
+                video_rotation_index = result
 
-            try:
-                await trial_reel_pass(config)
-            except Exception as e:
-                _log(f"FEHLER beim Trial-Reel-Scan: {_exc(e)}")
-
-            try:
-                await trial_wave_nudge_pass(config)
-            except Exception as e:
-                _log(f"FEHLER bei der Trial-Reel-Nachfrage: {_exc(e)}")
+            await _run_pass_safely("Trial-Reel-Scan", config, trial_reel_pass(config))
+            await _run_pass_safely("Trial-Reel-Nachfrage", config, trial_wave_nudge_pass(config))
 
             last_business = now
             _save_timer("business", now)
@@ -2340,11 +2411,7 @@ async def main():
         # mega lets go") — teurer als die anderen Passes (Multi-Frame Vision pro
         # Video), deshalb bewusst selten und von den anderen Zyklen entkoppelt.
         if now - last_deep_analysis >= DEEP_ANALYSIS_INTERVAL_SECONDS:
-            try:
-                await deep_pattern_analysis_pass(config)
-            except Exception as e:
-                _log(f"FEHLER bei der Tiefen-Analyse: {_exc(e)}")
-
+            await _run_pass_safely("Tiefen-Analyse", config, deep_pattern_analysis_pass(config))
             last_deep_analysis = now
             _save_timer("deep_analysis", now)
 
@@ -2352,11 +2419,7 @@ async def main():
         # Fehlersuche gehen") — losgeloest vom langsameren Business-Zyklus,
         # damit ein neuer Fehler nicht erst Stunden spaeter auffaellt.
         if now - last_self_improve >= SELF_IMPROVE_INTERVAL_SECONDS:
-            try:
-                await self_improve_pass(config)
-            except Exception as e:
-                _log(f"FEHLER bei Self-Improve: {_exc(e)}")
-
+            await _run_pass_safely("Self-Improve", config, self_improve_pass(config))
             last_self_improve = now
             _save_timer("self_improve", now)
 
@@ -2376,6 +2439,12 @@ async def main():
                 )
                 _save_timer("credit_alert", now)
             _credit_issue_seen_at = None
+
+        # Roadmap Punkt 21 — sagt systemd "dieser Tick ist komplett durchgelaufen,
+        # ich haenge nicht". Bleibt das aus (WatchdogSec in jarvis-brain.service),
+        # killt und startet systemd den Dienst selbst neu — das aeussere Netz
+        # fuer alles, was selbst ein wait_for-Timeout oben nicht auffangen konnte.
+        _sd_notify("WATCHDOG=1")
 
         await asyncio.sleep(LOOP_TICK_SECONDS)
 

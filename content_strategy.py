@@ -28,7 +28,11 @@ import memory
 import sheets_tools
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
-LOG_PATH = os.path.expanduser("~/Library/Logs/jarvis-content-strategy.log")
+# Server (2026-08-10): ~/Library/Logs existiert auf dem Linux-Server nicht.
+LOG_PATH = (
+    "/var/log/jarvis-content-strategy.log" if os.environ.get("JARVIS_ROLE") == "server"
+    else os.path.expanduser("~/Library/Logs/jarvis-content-strategy.log")
+)
 
 # Niche-relevant hashtags per Luna Vale account, per Accounts Overview's own
 # persona/niche columns (lunaxvale=dark feminine/alt-goth, cowgirllunavale=

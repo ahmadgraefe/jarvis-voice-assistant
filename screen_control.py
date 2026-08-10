@@ -30,7 +30,13 @@ except ImportError:
     pyautogui = None
 from PIL import ImageGrab
 
-LOG_PATH = os.path.expanduser("~/Library/Logs/jarvis-screen-control.log")
+# Server (2026-08-10): ~/Library/Logs existiert auf dem Linux-Server nicht
+# (die echten Funktionen hier laufen serverseitig ohnehin per mac_actuator_client-
+# Proxy nicht, aber der Pfad-Konstante schadet die Konsistenz-Korrektur nicht).
+LOG_PATH = (
+    "/var/log/jarvis-screen-control.log" if os.environ.get("JARVIS_ROLE") == "server"
+    else os.path.expanduser("~/Library/Logs/jarvis-screen-control.log")
+)
 
 # Never move faster than this, never move instantly across the whole screen —
 # small, real, deliberate — and a hard top-left "abort corner" pyautogui

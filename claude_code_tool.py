@@ -48,14 +48,15 @@ def _log(msg: str):
         pass
 
 
-async def _git_sync_server_changes(task: str):
+async def _git_sync_server_changes(task: str) -> str:
     """Server-seitig (2026-08-10): Claude Code arbeitet auf /opt/jarvis, einer
     vom Mac getrennten Projekt-Kopie. Ohne das hier wuerden Aenderungen dort
     still liegen bleiben und von Ahmads naechstem Deploy ueberschrieben werden
     koennen. Committed und pusht automatisch zum 'origin'-Remote (Deploy-Key
     braucht Schreibzugriff, siehe README/UEBERGABE), damit Ahmad sie per
     'git pull' auf dem Mac abholen kann. Kein Push noetig/sinnvoll wenn nichts
-    geaendert wurde."""
+    geaendert wurde. Gibt den neuen Commit-Hash zurueck (Roadmap Punkt 22,
+    fuers Self-Improve-Changelog), oder None wenn nichts committet wurde."""
     try:
         status = await asyncio.create_subprocess_exec(
             "git", "status", "--porcelain", cwd=WORKDIR,
@@ -64,7 +65,7 @@ async def _git_sync_server_changes(task: str):
         status_out, _ = await status.communicate()
         if not status_out.strip():
             _log("GIT-SYNC: keine Aenderungen, nichts zu committen.")
-            return
+            return None
 
         commit_msg = f"Claude Code (Server): {task[:100]}"
         for cmd in (
@@ -79,22 +80,27 @@ async def _git_sync_server_changes(task: str):
             out, err = await asyncio.wait_for(proc.communicate(), timeout=60)
             if proc.returncode != 0:
                 _log(f"GIT-SYNC FEHLER bei '{' '.join(cmd)}': {err.decode(errors='replace')[:300]}")
-                return
-        _log("GIT-SYNC: Aenderungen committed und gepusht.")
+                return None
+
+        rev = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "--short", "HEAD", cwd=WORKDIR,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        rev_out, _ = await rev.communicate()
+        commit_hash = rev_out.decode().strip() or None
+        _log(f"GIT-SYNC: Aenderungen committed und gepusht ({commit_hash}).")
+        return commit_hash
     except Exception as e:
         _log(f"GIT-SYNC FEHLER: {e}")
+        return None
 
 
-async def run_claude_code(task: str, timeout: int = DEFAULT_TIMEOUT) -> str:
-    """Run one non-interactive Claude Code task, scoped to this project's
-    directory, with full tool access (file edits, shell commands). Returns
-    its final text output, or 'ERROR: ...' on failure/timeout.
-
-    Server (2026-08-10): laeuft nativ hier, nicht mehr per Mac-Actuator-Proxy
-    (Ahmads ausdruecklicher Wunsch, volle Funktionalitaet auch wenn der Mac
-    aus ist). Muss dabei als eingeschraenkter User laufen (CLAUDE_CODE_USER),
-    --dangerously-skip-permissions verweigert sich sonst fuer root/sudo
-    (live bestaetigt, 2026-08-09)."""
+async def run_claude_code_with_commit(task: str, timeout: int = DEFAULT_TIMEOUT) -> tuple:
+    """Wie run_claude_code(), gibt zusaetzlich den Commit-Hash zurueck (str
+    oder None), falls die Aufgabe server-seitig etwas committet+gepusht hat —
+    fuer Roadmap Punkt 22 (Self-Improve-Changelog). Enthaelt die volle Logik,
+    run_claude_code() ist nur noch ein duenner Wrapper darum, damit bestehende
+    Aufrufer (z.B. server.py's claude_code_exec-Tool) unveraendert bleiben."""
     config = _load_config()
 
     if IS_SERVER:
@@ -121,21 +127,30 @@ async def run_claude_code(task: str, timeout: int = DEFAULT_TIMEOUT) -> str:
         except Exception:
             pass
         _log(f"TIMEOUT nach {timeout}s: {task[:200]}")
-        return f"ERROR: Claude Code Aufgabe hat das Zeitlimit ({timeout}s) ueberschritten."
+        return f"ERROR: Claude Code Aufgabe hat das Zeitlimit ({timeout}s) ueberschritten.", None
     except Exception as e:
         _log(f"FEHLER beim Start: {e}")
-        return f"ERROR: Claude Code konnte nicht gestartet werden: {e}"
+        return f"ERROR: Claude Code konnte nicht gestartet werden: {e}", None
 
     output = stdout.decode(errors="replace").strip()
     error_output = stderr.decode(errors="replace").strip()
 
     if proc.returncode != 0:
         _log(f"FEHLER (exit {proc.returncode}): {error_output[:300]}")
-        return f"ERROR: Claude Code Aufgabe fehlgeschlagen: {error_output[:500] or 'unbekannter Fehler'}"
+        return f"ERROR: Claude Code Aufgabe fehlgeschlagen: {error_output[:500] or 'unbekannter Fehler'}", None
 
     _log(f"FERTIG: {output[:200]}")
 
+    commit_hash = None
     if IS_SERVER:
-        await _git_sync_server_changes(task)
+        commit_hash = await _git_sync_server_changes(task)
 
-    return output or "Claude Code hat die Aufgabe ohne Textausgabe abgeschlossen."
+    return output or "Claude Code hat die Aufgabe ohne Textausgabe abgeschlossen.", commit_hash
+
+
+async def run_claude_code(task: str, timeout: int = DEFAULT_TIMEOUT) -> str:
+    """Run one non-interactive Claude Code task, scoped to this project's
+    directory, with full tool access (file edits, shell commands). Returns
+    its final text output, or 'ERROR: ...' on failure/timeout."""
+    output, _ = await run_claude_code_with_commit(task, timeout)
+    return output

@@ -17,7 +17,11 @@ import anthropic
 import memory
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
-LOG_PATH = os.path.expanduser("~/Library/Logs/jarvis-research.log")
+# Server (2026-08-10): ~/Library/Logs existiert auf dem Linux-Server nicht.
+LOG_PATH = (
+    "/var/log/jarvis-research.log" if os.environ.get("JARVIS_ROLE") == "server"
+    else os.path.expanduser("~/Library/Logs/jarvis-research.log")
+)
 
 RESEARCH_TOPICS = [
     "Instagram Reels Algorithmus Aenderungen 2026 was funktioniert aktuell fuer Wachstum",

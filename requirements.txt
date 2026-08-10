@@ -13,3 +13,5 @@ google-api-python-client>=2.140.0
 openpyxl>=3.1.0
 pyautogui>=0.9.54
 sentence-transformers>=3.0.0
+pywebpush>=2.0.0
+python-multipart>=0.0.9

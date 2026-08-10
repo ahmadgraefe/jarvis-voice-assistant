@@ -14,7 +14,12 @@ from playwright.async_api import async_playwright
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 SESSION_PATH = os.path.join(os.path.dirname(__file__), "fanplace_session.json")
-LOG_PATH = os.path.expanduser("~/Library/Logs/jarvis-fanplace.log")
+# Server (2026-08-10): ~/Library/Logs existiert auf dem Linux-Server nicht,
+# _log() unten hat das bisher still verschluckt (except OSError: pass).
+LOG_PATH = (
+    "/var/log/jarvis-fanplace.log" if os.environ.get("JARVIS_ROLE") == "server"
+    else os.path.expanduser("~/Library/Logs/jarvis-fanplace.log")
+)
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 _playwright = None
@@ -165,6 +170,31 @@ async def _get_context():
         storage = SESSION_PATH if os.path.exists(SESSION_PATH) else None
         _context = await _browser.new_context(storage_state=storage, user_agent=UA)
     return _context
+
+
+def reset_browser():
+    """Roadmap Punkt 21 — gleiches Muster wie instagram_tools.reset_browser()."""
+    global _playwright, _browser, _context
+    old_browser, old_playwright = _browser, _playwright
+    _playwright, _browser, _context = None, None, None
+    if old_browser is None:
+        return
+
+    async def _cleanup():
+        try:
+            await asyncio.wait_for(old_browser.close(), timeout=10)
+        except Exception:
+            pass
+        if old_playwright is not None:
+            try:
+                await asyncio.wait_for(old_playwright.stop(), timeout=10)
+            except Exception:
+                pass
+
+    try:
+        asyncio.get_event_loop().create_task(_cleanup())
+    except RuntimeError:
+        pass
 
 
 async def _login(page) -> bool:

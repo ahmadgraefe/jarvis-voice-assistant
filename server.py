@@ -17,9 +17,9 @@ from zoneinfo import ZoneInfo
 
 import anthropic
 import httpx
-from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 # Load config
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
@@ -939,6 +939,176 @@ async def _tool_browser_extract(args: dict) -> str:
     return "\n".join(lines)
 
 
+async def _tool_self_improve_log(args: dict) -> str:
+    """Roadmap Punkt 22 — on-demand Gegenstueck zum stillen Morgen-Briefing-
+    Hinweis (background_brain.py's morning_briefing_pass): explizite
+    Nachfrage nach dem, was self_improve_pass zuletzt an sich selbst
+    veraendert hat."""
+    hours = args.get("hours", 24)
+    entries = memory.get_recent_self_improve_entries(hours)
+    if not entries:
+        return f"In den letzten {hours} Stunden hat sich Jarvis nicht selbst an Fehlern versucht."
+    lines = []
+    for e in entries:
+        commit = f" (Commit {e['commit_hash']})" if e.get("commit_hash") else ""
+        lines.append(f"[{e['timestamp']}]{commit}: {e['result']}")
+    return "\n".join(lines)
+
+
+# Sicherheitsgrenze: Subagenten laufen OHNE Rueckfrage-Moeglichkeit bei Ahmad
+# (das ist der Zweck von delegate_subagents/simulate_decision), duerfen darum
+# NICHTS tun das eine andere echte Person erreicht, Ahmads echtes Geraet/
+# Kalender/Bildschirm veraendert, beliebigen Code ausfuehrt, oder im
+# Playwright-Browser final klickt/abschickt (koennte einen echten Kauf
+# abschliessen) — genau die Sorte Aktion, fuer die der Hauptloop laut
+# System-Prompt vorher Ahmads Bestaetigung einholen soll. Ein Subagent, der
+# 'nur simuliert', darf so eine Aktion niemals versehentlich WIRKLICH
+# ausloesen. Rein lesende/interne Werkzeuge (Recherche, eigenes Gedaechtnis,
+# Wissensgraph, Browser OEFFNEN/LESEN) bleiben erlaubt. Jedes kuenftige neue
+# Tool mit echtem Seiteneffekt muss hier bewusst ergaenzt werden.
+_SUBAGENT_EXCLUDED_TOOLS = {
+    "delegate_subagents", "simulate_decision",  # keine unbegrenzte Rekursion
+    "calendar_add", "calendar_delete",
+    "whatsapp_send", "jerome_msg",
+    "open_url", "open_app",
+    "screen_click", "screen_type",
+    "browser_click", "browser_fill_field",
+    "claude_code_exec",
+}
+
+
+async def _run_subagent_turn(task: str, max_rounds: int = 4) -> str:
+    """Roadmap Punkt 23 — eigenstaendige, session-lose Variante von
+    process_message_native fuer EINE Teilaufgabe: kein session_id/ws/_speak,
+    keine gemeinsame conversations[]-Historie, kein Dialog (der Subagent kann
+    nicht nachfragen, muss selbst entscheiden). Nutzt dieselben TOOL_REGISTRY/
+    _run_tool wie der Hauptloop, darf aber selbst NICHT delegate_subagents/
+    simulate_decision aufrufen (keine unbegrenzte Rekursion). Gibt am Ende
+    eine kompakte Text-Zusammenfassung zurueck statt sie vorzulesen.
+
+    _SUBAGENT_TOOLS wird bewusst HIER drin aus dem globalen TOOLS gefiltert
+    (nicht als Modul-Konstante direkt neben TOOL_REGISTRY) — TOOLS selbst
+    entsteht erst NACH TOOL_REGISTRY (siehe unten), und diese Funktion muss
+    schon VOR TOOL_REGISTRY existieren, weil delegate_subagents/simulate_decision
+    dort als Handler direkt referenziert werden."""
+    subagent_tools = [t for t in TOOLS if t["name"] not in _SUBAGENT_EXCLUDED_TOOLS]
+    messages = [{"role": "user", "content": task}]
+    system = (
+        "Du bist Jarvis' interner Subagent fuer genau eine Teilaufgabe, kein Dialog moeglich "
+        "(keine Rueckfrage, entscheide selbst wenn etwas unklar ist). Nutze die verfuegbaren "
+        "Werkzeuge um die Aufgabe zu bearbeiten. Antworte am Ende NUR mit einer kompakten, "
+        "auf Deutsch geschriebenen Zusammenfassung deiner Ergebnisse — keine Anrede, keine "
+        "Hoeflichkeitsfloskeln, nur die Fakten."
+    )
+
+    last_text = ""
+    for _ in range(max_rounds):
+        try:
+            response = await ai.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=400,
+                system=system,
+                tools=subagent_tools,
+                messages=messages,
+            )
+        except Exception as e:
+            return f"ERROR: Subagent-Aufruf fehlgeschlagen: {e}"
+
+        text_blocks = [b.text for b in response.content if b.type == "text" and b.text.strip()]
+        tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
+        if text_blocks:
+            last_text = " ".join(text_blocks)
+
+        messages.append({"role": "assistant", "content": response.content})
+
+        if not tool_use_blocks:
+            return last_text or "Subagent hat keine Zusammenfassung geliefert."
+
+        results = await asyncio.gather(*(_run_tool(b) for b in tool_use_blocks))
+        tool_result_content = [
+            {"type": "tool_result", "tool_use_id": r["tool_use_id"], "content": r["content"], "is_error": r["is_error"]}
+            for r in results
+        ]
+        messages.append({"role": "user", "content": tool_result_content})
+
+    return last_text or f"Subagent hat die Aufgabe nicht innerhalb von {max_rounds} Runden abgeschlossen."
+
+
+async def _tool_delegate_subagents(args: dict) -> str:
+    """Roadmap Punkt 23 — mehrere wirklich unabhaengige Teilaufgaben parallel
+    statt seriell Modul fuer Modul. Jede Teilaufgabe laeuft als eigener
+    _run_subagent_turn mit eigenem Tool-Zugriff, nicht nur ein einzelner
+    Haiku-Call ohne Werkzeuge."""
+    subtasks = args.get("subtasks") or []
+    if not subtasks:
+        return "ERROR: keine Teilaufgaben angegeben."
+    results = await asyncio.gather(*(_run_subagent_turn(t) for t in subtasks))
+    lines = [f"{i}. {t}\n   -> {r}" for i, (t, r) in enumerate(zip(subtasks, results), 1)]
+    return "\n".join(lines)
+
+
+async def _tool_simulate_decision(args: dict) -> str:
+    """Roadmap Punkt 24 — nutzt _run_subagent_turn (Punkt 23) direkt: erst
+    plausible Optionen generieren (falls nicht mitgegeben), dann jede parallel
+    simulieren (darf dabei Werkzeuge nutzen, z.B. den Wissensgraphen fuer
+    aehnliche vergangene Entscheidungen), zuletzt eine Empfehlung synthetisieren."""
+    decision = args.get("decision", "").strip()
+    if not decision:
+        return "ERROR: keine Entscheidung angegeben."
+    context = args.get("context", "").strip()
+    options = args.get("options") or []
+
+    if not options:
+        options_prompt = (
+            f"Entscheidung: {decision}\nKontext: {context or 'keiner angegeben'}\n\n"
+            "Nenne 2 bis 4 plausible, klar unterscheidbare Handlungsoptionen fuer diese Entscheidung. "
+            "Antworte NUR als JSON-Array von kurzen Strings, z.B. [\"Option A\", \"Option B\"]."
+        )
+        try:
+            resp = await ai.messages.create(
+                model="claude-haiku-4-5-20251001", max_tokens=300,
+                messages=[{"role": "user", "content": options_prompt}],
+            )
+            raw = resp.content[0].text.strip()
+            start, end = raw.index("["), raw.rindex("]") + 1
+            options = json.loads(raw[start:end])
+        except Exception as e:
+            return f"ERROR: Konnte keine Optionen generieren: {e}"
+
+    if not options:
+        return "ERROR: keine Optionen zum Simulieren gefunden."
+
+    sim_tasks = [
+        f"Simuliere den wahrscheinlichsten Ausgang, wenn bei folgender Entscheidung diese Option "
+        f"gewaehlt wird: '{opt}'. Entscheidung: {decision}. Kontext: {context or 'keiner angegeben'}. "
+        "Nenne konkrete Chancen und Risiken, mehrere Schritte vorausgedacht. Nutze verfuegbare "
+        "Werkzeuge (z.B. den Wissensgraphen) falls das bei aehnlichen frueheren Entscheidungen hilft."
+        for opt in options
+    ]
+    simulations = await asyncio.gather(*(_run_subagent_turn(t) for t in sim_tasks))
+
+    synthesis_prompt = (
+        f"Entscheidung: {decision}\nKontext: {context or 'keiner angegeben'}\n\n"
+        "Simulierte Ausgaenge je Option:\n"
+        + "\n".join(f"- {opt}: {sim}" for opt, sim in zip(options, simulations))
+        + "\n\nVergleiche die Optionen und gib eine begruendete Empfehlung auf Deutsch, in 3-5 Saetzen."
+    )
+    try:
+        resp = await ai.messages.create(
+            model="claude-haiku-4-5-20251001", max_tokens=500,
+            messages=[{"role": "user", "content": synthesis_prompt}],
+        )
+        recommendation = resp.content[0].text.strip()
+    except Exception as e:
+        recommendation = f"(Empfehlung konnte nicht synthetisiert werden: {e})"
+
+    lines = [f"Simulierte Optionen fuer: {decision}"]
+    for opt, sim in zip(options, simulations):
+        lines.append(f"- {opt}: {sim}")
+    lines.append(f"\nEmpfehlung: {recommendation}")
+    return "\n".join(lines)
+
+
 async def _tool_news(args: dict) -> str:
     return await browser_tools.fetch_news()
 
@@ -1415,6 +1585,82 @@ TOOL_REGISTRY: dict = {
             },
         },
         handler=_tool_browser_extract,
+        speak_result=True,
+        slow=True,
+    ),
+    "self_improve_log": ToolSpec(
+        schema={
+            "name": "self_improve_log",
+            "description": (
+                "Zeigt was Jarvis zuletzt selbststaendig im Hintergrund an sich selbst repariert hat "
+                "(Roadmap Punkt 22). Nutze das bei Nachfragen wie 'was hast du zuletzt an dir selbst "
+                "geaendert' oder 'gab es Selbstreparaturen'."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "hours": {"type": "integer", "description": "Zeitraum in Stunden, Default 24."},
+                },
+                "required": [],
+            },
+        },
+        handler=_tool_self_improve_log,
+        speak_result=True,
+    ),
+    "delegate_subagents": ToolSpec(
+        schema={
+            "name": "delegate_subagents",
+            "description": (
+                "Roadmap Punkt 23 — mehrere WIRKLICH unabhaengige Teilaufgaben parallel bearbeiten "
+                "lassen (z.B. Instagram-Zahlen UND Finanzstatus UND aktuelle Trends in einer Anfrage), "
+                "statt sie seriell nacheinander abzufragen. Jede Teilaufgabe bekommt einen eigenen "
+                "Subagenten mit Lese-/Recherche-Werkzeugen (kein WhatsApp/Jerome/Kalender/Kauf/Code-"
+                "Ausfuehrung — dafuer bleibt der normale Weg mit Ahmads Bestaetigung noetig). NUR "
+                "nutzen wenn die Teilaufgaben wirklich unabhaengig voneinander sind, nicht fuer "
+                "einfache sequenzielle Anfragen."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "subtasks": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "2 bis 5 klar formulierte, unabhaengige Teilaufgaben.",
+                    },
+                },
+                "required": ["subtasks"],
+            },
+        },
+        handler=_tool_delegate_subagents,
+        speak_result=True,
+        slow=True,
+    ),
+    "simulate_decision": ToolSpec(
+        schema={
+            "name": "simulate_decision",
+            "description": (
+                "Roadmap Punkt 24 — vor einer wichtigen Entscheidung (z.B. Jerome-bezogen: 'sollen wir "
+                "dieses Reel-Format skalieren?') mehrere moegliche Ausgaenge durchspielen lassen, bevor "
+                "eine Empfehlung kommt. Reine Simulation/Denkarbeit — die dabei genutzten Subagenten "
+                "koennen NICHTS wirklich auslösen (kein Senden/Kalender/Kauf), das bleibt bewusst "
+                "getrennt von einer echten Umsetzung. Kein Hellsehen, aber strukturiertes Vorausdenken "
+                "statt Bauchgefuehl. Sag vorher einen kurzen Satz wie 'Ich denke das kurz durch.'"
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "decision": {"type": "string", "description": "Die zu treffende Entscheidung."},
+                    "context": {"type": "string", "description": "Relevanter Hintergrund, optional."},
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Konkrete Optionen, falls schon bekannt. Sonst generiert Jarvis selbst welche.",
+                    },
+                },
+                "required": ["decision"],
+            },
+        },
+        handler=_tool_simulate_decision,
         speak_result=True,
         slow=True,
     ),
@@ -1965,6 +2211,8 @@ SLOW_TOOL_FILLERS = {
     "claude_code_exec": "Ich lasse das kurz von Claude Code erledigen.",
     "fanplace_snapshot": "Ich schaue kurz auf Fanplace nach.",
     "sltbio_snapshot": "Ich schaue kurz bei SLT.bio nach.",
+    "delegate_subagents": "Ich teile das auf und kuemmere mich parallel darum.",
+    "simulate_decision": "Ich denke das kurz durch.",
 }
 
 # Legacy-Aktionsnamen, die durch ein natives Tool in TOOL_REGISTRY ersetzt
@@ -2582,6 +2830,28 @@ async def shortcut_endpoint(payload: dict):
     fake_ws = _FakeWebSocket()
     await process_message(session_id, text, fake_ws)
     return {"text": " ".join(fake_ws.captured_text).strip()}
+
+
+@app.post("/internal/push_event")
+async def internal_push_event(payload: dict, request: Request):
+    """Roadmap Punkt 3 — Event-Bus: background_brain.py (ein SEPARATER
+    Prozess) ruft das direkt auf statt nur auf den 5-Sekunden-Datei-Poll
+    (_live_events_poll_loop unten) zu warten, senkt die Zustellzeit im
+    Normalfall auf nahezu sofort. Der Datei-Weg bleibt zusaetzlich bestehen
+    als Fallback (z.B. wenn server.py gerade neu startet). Nur von localhost
+    erreichbar (anders als mac_actuator.py, das an die Tailscale-IP bindet,
+    bindet server.py an 0.0.0.0 — dieser eine sensible interne Endpunkt
+    braucht daher einen eigenen Schutz statt sich auf die Firewall zu
+    verlassen, sonst koennte theoretisch jeder von aussen Ahmad beliebigen
+    Text vorsprechen lassen)."""
+    client_host = request.client.host if request.client else None
+    if client_host not in ("127.0.0.1", "::1"):
+        return JSONResponse(status_code=403, content={"error": "nur von localhost erreichbar"})
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return {"delivered": False, "reason": "text fehlt"}
+    delivered = await _push_live_event(text)
+    return {"delivered": delivered}
 
 
 if __name__ == "__main__":
