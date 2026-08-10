@@ -1011,8 +1011,17 @@ async def self_improve_pass(config: dict):
         "\n\nUntersuche die Ursache im Code. Wenn du eine sichere, minimale Korrektur machen "
         "kannst, tu es. Wenn die Ursache unklar ist oder eine Entscheidung von Ahmad braucht "
         "(z.B. ein fehlender API-Zugang), aendere NICHTS und beschreibe stattdessen genau was "
-        "das Problem ist. Fasse am Ende in 2-3 Saetzen auf Deutsch zusammen was du getan oder "
-        "herausgefunden hast."
+        "das Problem ist.\n\n"
+        "WICHTIG (Ahmad, 2026-08-10, nach einem echten Vorfall — Jarvis erklaerte live einen "
+        "laengst durch insights_inbox_pass ersetzten alten Workflow, weil niemand sein eigenes "
+        "Gedaechtnis/claude_app_status.md aktualisiert hatte, als der Workflow im Code geaendert "
+        "wurde): falls deine Korrektur einen dokumentierten Geschaeftsprozess/Workflow betrifft "
+        "(z.B. WIE Ahmad Daten eingibt, welcher Kanal wofuer genutzt wird), pruefe ob "
+        "claude_app_status.md dazu etwas Veraltetes sagt, und aktualisiere es in DERSELBEN "
+        "Aenderung. Ein Workflow der nur im Code existiert, aber nirgends in Jarvis' eigenem "
+        "Wissen dokumentiert ist, fuehrt sonst dazu dass Jarvis im Gespraech weiter den alten "
+        "Prozess erklaert.\n\n"
+        "Fasse am Ende in 2-3 Saetzen auf Deutsch zusammen was du getan oder herausgefunden hast."
     )
     result, commit_hash = await claude_code_tool.run_claude_code_with_commit(task)
     _log(f"Self-Improve Ergebnis: {result[:300]}")
@@ -1244,6 +1253,12 @@ async def skill_growth_pass(config: dict):
         "memory.mark_self_built_skill_confirmed(name) auf, danach laeuft es automatisch. Nutze "
         "GENAU diese beiden schon vorhandenen memory.py-Funktionen, erfinde keinen eigenen "
         "Bestaetigungs-Mechanismus. Rein lesende/harmlose Werkzeuge brauchen dieses Gate NICHT.\n\n"
+        "WICHTIG (Ahmad, 2026-08-10, nach einem echten Vorfall — Jarvis erklaerte live einen "
+        "laengst ersetzten alten Workflow, weil niemand claude_app_status.md aktualisiert hatte, "
+        "als sich der echte Prozess geaendert hatte): falls dieses neue Werkzeug einen "
+        "dokumentierten Geschaeftsprozess/Workflow beruehrt oder ersetzt, pruefe ob "
+        "claude_app_status.md dazu etwas Veraltetes sagt, und aktualisiere es in DERSELBEN "
+        "Aenderung.\n\n"
         "Pruefe am Ende mit 'python3 -m py_compile server.py' dass alles syntaktisch sauber ist. "
         "Fasse in 2-3 Saetzen auf Deutsch zusammen was du gebaut oder herausgefunden hast."
     )
