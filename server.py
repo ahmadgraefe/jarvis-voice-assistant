@@ -985,7 +985,7 @@ async def _tool_skill_growth_log(args: dict) -> str:
 # Wissensgraph, Browser OEFFNEN/LESEN) bleiben erlaubt. Jedes kuenftige neue
 # Tool mit echtem Seiteneffekt muss hier bewusst ergaenzt werden.
 _SUBAGENT_EXCLUDED_TOOLS = {
-    "delegate_subagents", "simulate_decision",  # keine unbegrenzte Rekursion
+    "delegate_subagents", "simulate_decision", "boardroom",  # keine unbegrenzte Rekursion
     "calendar_add", "calendar_delete",
     "whatsapp_send", "jerome_msg",
     "scaling_log", "jerome_brief",  # schicken beide real eine WhatsApp-Nachricht an Jerome
@@ -1126,6 +1126,120 @@ async def _tool_simulate_decision(args: dict) -> str:
         lines.append(f"- {opt}: {sim}")
     lines.append(f"\nEmpfehlung: {recommendation}")
     return "\n".join(lines)
+
+
+# Ahmads Wunsch (2026-08-11), nachdem er die "Boardroom"-Claude-Skill separat in Claude Code
+# installiert hatte: dieselbe Methodik (Karpathys LLM Council) live IM GESPRAECH mit Jarvis
+# nutzbar machen, nicht nur beim Programmieren. Bewusst EIGENSTAENDIGE Implementierung statt
+# ueber _run_subagent_turn: die 5 Berater sollen aus dem einmal zusammengestellten Kontext
+# heraus urteilen (Perspektiven-Vielfalt ist der Punkt), nicht selbst Werkzeuge benutzen und auf
+# eigene Faust weiterrecherchieren -- das waere langsamer und würde vom eigentlichen Zweck
+# ablenken. Unterscheidet sich von simulate_decision (Punkt 24): das dort simuliert AUSGAENGE
+# pro Option, hier geben 5 FESTE Denk-Stile eine volle Meinung zur GANZEN Frage ab und
+# reviewen sich anschliessend gegenseitig -- ergaenzend, nicht redundant.
+_BOARDROOM_ADVISORS = [
+    ("Der CFO", "Schaut auf Zahlen, ROI, Cashflow, Risiko, Finanzierung. Konservativ, "
+                "datengetrieben. Fragt: Wieviel kostet das? Was bringt es, in welcher Zeit? "
+                "Was passiert, wenn eine Annahme um 30% daneben liegt? Sagt Stop, wenn es "
+                "finanziell nicht traegt, egal wie gut die Idee klingt."),
+    ("Der Operator", "Fokus auf Skalierbarkeit, Prozesse, Team-Belastung, Implementierung. "
+                      "Fragt: Wer macht das? Wie lange dauert es? Was bricht im bestehenden "
+                      "Workflow? Eine geniale Idee ohne klaren Umsetzungspfad ist fuer ihn eine "
+                      "schlechte Idee."),
+    ("Der Vertriebler", "Fokus: Wachstums-/Sales-Impact, Audience-Reaktion, Markt-Resonanz, "
+                         "Pricing. Fragt: Was sagt die Audience, wenn sie das sieht? Laesst "
+                         "sich das leicht erklaeren? Macht das Wachstum/Verkauf leichter oder "
+                         "schwerer?"),
+    ("Der Mentor", "Erfahrung, langfristige Konsequenzen, Muster-Erkennung. Sieht das grosse "
+                    "Spiel, nicht den naechsten Zug. Manchmal sein wertvollster Beitrag: 'Du "
+                    "loest gerade das falsche Problem, das merkst du erst in Monaten.'"),
+    ("Der Skeptiker", "Versteckte Risiken, uebersehene Annahmen, Worst-Case-Szenarien. Stellt "
+                       "die unbequeme Frage: welche unausgesprochene Annahme steckt hier drin, "
+                       "und was wenn sie falsch ist? Rettet vor dem teuren Fehler, ist nicht "
+                       "einfach nur negativ."),
+]
+
+
+async def _boardroom_call(system: str, user_content: str, max_tokens: int) -> str:
+    try:
+        resp = await ai.messages.create(
+            model="claude-haiku-4-5-20251001", max_tokens=max_tokens,
+            system=system, messages=[{"role": "user", "content": user_content}],
+        )
+        return "\n".join(b.text for b in resp.content if b.type == "text").strip()
+    except Exception as e:
+        return f"(Aufruf fehlgeschlagen: {e})"
+
+
+async def _tool_boardroom(args: dict) -> str:
+    """5 unabhaengige Berater-Perspektiven -> anonymes Peer-Review -> Chairman-Synthese.
+    Speichert das volle Verdict im Wissens-Log (memory.get_knowledge, fliesst in kuenftige
+    Gespraeche mit ein), gibt aber selbst die volle Fassung zurueck -- die Kompression auf eine
+    sprechbare Antwort macht wie bei jedem anderen Tool das Hauptmodell im naechsten Zug."""
+    question = args.get("question", "").strip()
+    if not question:
+        return "ERROR: keine Frage angegeben."
+    context = args.get("context", "").strip()
+
+    business = get_luna_vale_knowledge()
+    framed = (
+        f"Entscheidungsfrage: {question}\n\n"
+        + (f"Zusaetzlicher Kontext von Ahmad: {context}\n\n" if context else "")
+        + f"Geschaeftskontext (Luna Vale):\n{business[:3000]}"
+    )
+
+    advisor_system_tpl = (
+        "Du bist {name} in einem Boardroom, das Ahmad bei einer Entscheidung beraet.\n"
+        "Dein Denk-Stil: {style}\n\n"
+        "Antworte NUR aus dieser Perspektive. Sei direkt und spezifisch, hedge nicht, versuch "
+        "nicht balanciert zu sein -- andere Berater decken andere Winkel ab. 150-300 Woerter, "
+        "kein Vorgeplaenkel, direkt in die Analyse, auf Deutsch."
+    )
+    advisor_results = await asyncio.gather(*(
+        _boardroom_call(advisor_system_tpl.format(name=name, style=style), framed, max_tokens=450)
+        for name, style in _BOARDROOM_ADVISORS
+    ))
+
+    letters = "ABCDE"
+    anon_block = "\n\n".join(
+        f"Antwort {letters[i]}:\n{text}" for i, text in enumerate(advisor_results)
+    )
+    review_system = (
+        "Du reviewst anonymisierte Antworten eines Boardrooms zu einer Entscheidungsfrage. "
+        "Beantworte in unter 200 Woertern, auf Deutsch: 1) welche Antwort ist am staerksten und "
+        "warum (per Buchstabe referenzieren), 2) welche hat den groessten blinden Fleck, "
+        "3) was haben ALLE Antworten uebersehen. Sei direkt."
+    )
+    review_content = f"Frage: {framed}\n\n{anon_block}"
+    reviews = await asyncio.gather(*(
+        _boardroom_call(review_system, review_content, max_tokens=300) for _ in _BOARDROOM_ADVISORS
+    ))
+
+    named_block = "\n\n".join(
+        f"{name}:\n{text}" for (name, _), text in zip(_BOARDROOM_ADVISORS, advisor_results)
+    )
+    reviews_block = "\n\n".join(f"Review {i + 1}:\n{r}" for i, r in enumerate(reviews))
+    chairman_system = (
+        "Du bist der Chairman eines Boardrooms. Synthetisiere die 5 Berater-Antworten und die "
+        "5 Peer-Reviews zu einem finalen Verdict, auf Deutsch, in GENAU dieser Struktur:\n\n"
+        "EMPFEHLUNG: (2-3 Saetze, klar und direkt, kein 'kommt drauf an'. Du darfst der "
+        "Mehrheit widersprechen wenn ein Dissenter staerker argumentiert hat.)\n"
+        "NAECHSTER SCHRITT: (EINE konkrete Aktion fuer diese Woche, keine Liste.)\n"
+        "EINIGKEIT: (Konvergenzpunkte zwischen den Beratern.)\n"
+        "STREIT: (echte Meinungsverschiedenheiten, beide Seiten kurz zeigen.)\n"
+        "BLINDE FLECKEN: (was erst durchs Peer-Review sichtbar wurde.)\n\n"
+        "Sei direkt, hedge nicht."
+    )
+    chairman_content = f"Frage: {framed}\n\nBERATER-ANTWORTEN:\n{named_block}\n\nPEER-REVIEWS:\n{reviews_block}"
+    verdict = await _boardroom_call(chairman_system, chairman_content, max_tokens=700)
+
+    memory.add_knowledge(f"Boardroom zu '{question}':\n{verdict}", category="boardroom")
+
+    return (
+        f"Boardroom-Verdict zu: {question}\n\n{verdict}\n\n"
+        "(Volles Verdict inkl. aller 5 Einzelmeinungen und Peer-Reviews ist im Wissens-Log "
+        "gespeichert -- bei Nachfrage im Detail abrufbar.)"
+    )
 
 
 async def _tool_news(args: dict) -> str:
@@ -1803,6 +1917,39 @@ TOOL_REGISTRY: dict = {
         speak_result=True,
         slow=True,
     ),
+    "boardroom": ToolSpec(
+        schema={
+            "name": "boardroom",
+            "description": (
+                "Fuenf unabhaengige Berater-Denk-Stile (CFO/Zahlen, Operator/Umsetzung, "
+                "Vertriebler/Markt, Mentor/Erfahrung, Skeptiker/Risiko) geben JEDER eine volle "
+                "Meinung zur GANZEN Frage ab, reviewen sich anschliessend anonym gegenseitig, "
+                "ein Chairman synthetisiert das zu einem finalen Verdict (Empfehlung, ein "
+                "naechster Schritt, Einigkeit, Streit, blinde Flecken). Unterschied zu "
+                "simulate_decision: das dort simuliert AUSGAENGE pro Handlungsoption, hier geht "
+                "es um Perspektiven-Vielfalt UND gegenseitige Kritik zu EINER Frage als Ganzes "
+                "-- fuer den echten Pressure-Test einer Entscheidung, nicht fuer Was-waere-wenn. "
+                "NUR nutzen bei einer echten Entscheidung mit Stakes und mehreren moeglichen "
+                "Wegen ('soll ich X oder Y', 'welcher Weg ist besser', 'lohnt sich das', 'ich "
+                "bin unentschlossen') oder wenn Ahmad woertlich 'Boardroom' sagt oder etwas "
+                "'stress-testen'/'pressure-testen' will. NICHT nutzen bei Faktenfragen, "
+                "einfachen Lookups, oder wenn nur ein Text geschrieben werden soll. Dauert "
+                "eine Weile (mehrere Gesprächsrunden im Hintergrund) -- sag vorher kurz 'Ich "
+                "berufe das Boardroom ein, das dauert kurz.'"
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "Die zu pruefende Entscheidung/Frage."},
+                    "context": {"type": "string", "description": "Zusaetzlicher Hintergrund von Ahmad, optional."},
+                },
+                "required": ["question"],
+            },
+        },
+        handler=_tool_boardroom,
+        speak_result=True,
+        slow=True,
+    ),
     "news": ToolSpec(
         schema={
             "name": "news",
@@ -2353,6 +2500,7 @@ SLOW_TOOL_FILLERS = {
     "sltbio_snapshot": "Ich schaue kurz bei SLT.bio nach.",
     "delegate_subagents": "Ich teile das auf und kuemmere mich parallel darum.",
     "simulate_decision": "Ich denke das kurz durch.",
+    "boardroom": "Ich berufe kurz das Boardroom ein.",
 }
 
 # Legacy-Aktionsnamen, die durch ein natives Tool in TOOL_REGISTRY ersetzt
