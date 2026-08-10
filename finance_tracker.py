@@ -179,20 +179,52 @@ def _append_payout_rows_sync(rows: list):
     ).execute()
 
 
+MONATE_DE = ["Januar", "Februar", "März", "April", "Mai", "Juni",
+             "Juli", "August", "September", "Oktober", "November", "Dezember"]
+
+
+def _parse_eur(text) -> float:
+    """'1.133,04 €' / '0,00 €' / '–' / '' -> float. Die Monatsuebersicht
+    liefert ihre Betraege deutsch formatiert und MIT Waehrungssymbol
+    zurueck (Punkt = Tausender-, Komma = Dezimaltrennzeichen), nicht als
+    nackte Zahl — genau daran ist der Trend-Check am 10.08.2026 mit
+    "could not convert string to float: '0.00 €'" gescheitert."""
+    if isinstance(text, (int, float)):
+        return float(text)
+    s = (text or "").replace("€", "").replace(" ", " ").strip()
+    if not s or s in ("-", "–"):
+        return 0.0
+    if "," in s:  # deutsches Format; ohne Komma ist ein Punkt das Dezimaltrennzeichen
+        s = s.replace(".", "").replace(",", ".")
+    return float(s)
+
+
 def _get_recent_month_summary_sync() -> dict:
     service = sheets_tools._get_service()
     result = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID, range=f"'{MONATSUEBERSICHT_TAB}'!A5:G16"
     ).execute()
-    rows = [r for r in result.get("values", []) if len(r) >= 4 and r[3]]  # Gesamtkosten (D) gefuellt
-    if len(rows) < 2:
+    rows = [r for r in result.get("values", []) if r and r[0]]
+
+    # Die Monatsuebersicht haelt ALLE zwoelf Monate des Jahres vor, kuenftige
+    # Monate stehen mit "0,00 €" da — "die letzten beiden gefuellten Zeilen"
+    # waeren also immer Dezember/November. Deshalb wird der laufende Monat
+    # ueber das Datum gesucht und mit der Zeile direkt darueber verglichen.
+    now = time.localtime()
+    monat, jahr = MONATE_DE[now.tm_mon - 1].lower(), str(now.tm_year)
+    labels = [r[0].strip().lower() for r in rows]
+    idx = next((i for i, l in enumerate(labels) if l.startswith(monat) and jahr in l), None)
+    if idx is None:
+        idx = next((i for i, l in enumerate(labels) if l.startswith(monat)), None)
+    if not idx:  # nicht gefunden, oder Januar — dann liegt der Vormonat nicht im Sheet
         return {}
-    current, previous = rows[-1], rows[-2]
+
+    current, previous = rows[idx], rows[idx - 1]
     return {
-        "current_month": current[0], "current_total_cost": float(str(current[3]).replace(",", ".") or 0),
-        "current_netto": float(str(current[5]).replace(",", ".") or 0) if len(current) > 5 else None,
-        "previous_month": previous[0], "previous_total_cost": float(str(previous[3]).replace(",", ".") or 0),
-        "previous_netto": float(str(previous[5]).replace(",", ".") or 0) if len(previous) > 5 else None,
+        "current_month": current[0], "current_total_cost": _parse_eur(current[3]) if len(current) > 3 else 0.0,
+        "current_netto": _parse_eur(current[5]) if len(current) > 5 else None,
+        "previous_month": previous[0], "previous_total_cost": _parse_eur(previous[3]) if len(previous) > 3 else 0.0,
+        "previous_netto": _parse_eur(previous[5]) if len(previous) > 5 else None,
     }
 
 
