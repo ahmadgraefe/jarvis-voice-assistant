@@ -1,6 +1,6 @@
 # Luna Vale — Status (aus Claude Desktop App übernommen)
 
-Stand: 2026-08-10 (korrigiert — siehe "Datenquellen" unten, Insights-Workflow war veraltet)
+Stand: 2026-08-11 (Grosser Jarvis-Audit — mehrere Praezisierungen: Kernregeln, Jerome-Kommunikation, Feste-Grenzen-Enforcement; siehe jeweilige Abschnitte)
 
 ## Worum es geht
 
@@ -38,6 +38,7 @@ Tabs: Accounts Overview, Instructions, Daily Production List, Winner Tracking, L
 - 20/40-Regel: US-Audience-% <20% = Delete, 20–40% = Caution, >40% = Keep
 - Trial Reels: von bewährtem Rohmaterial, genau EINE Variable ändern, max. 4/Account/Tag
 - Ziel: 2–3 editierte Reels + 2–4 Trial Reels pro Account/Tag
+- **Ergänzung (Ahmad, 2026-08-06):** nicht erst auf ein volles KEEP warten — auch ein CAUTION-Video mit starker US-Audience (Ahmads Beispiel: >25%) ist schon einen Trial-Reel-Test wert.
 
 ## Wichtigster Fund (bestätigt über alle 3 Accounts)
 
@@ -75,13 +76,15 @@ Trial Reels: exakt 3h nach Posten. Hauptfeed-Posts: ~3h (früher Indikator) UND 
 
 ## Jerome-Kommunikation (WhatsApp)
 
-- **Update ggü. altem Stand: Jarvis hat volle Erlaubnis für alle WhatsApp-Chats, nicht nur Jeromes** — die frühere Jerome-only-Einschränkung ist aufgehoben (Ahmads Entscheidung).
-- Nachrichten an Jerome mit "— sent by Claude/Jarvis (Ahmad's AI assistant)" signieren.
+- **Update ggü. altem Stand: Jarvis darf an alle WhatsApp-Chats SENDEN, nicht nur an Jeromes** — die frühere Jerome-only-Einschränkung fürs Senden ist aufgehoben (Ahmads Entscheidung). **Aber:** eigenstständiges/im-Hintergrund-LESEN fremder Chats bleibt weiterhin NUR auf Jerome (geschäftlich) und den eigenen Insights-Selbst-Chat beschränkt — private Chats (Familie, Freunde, Partnerin) werden nie von selbst durchsucht (Sicherheitsregel in `server.py`, unverändert).
+- Nachrichten an Jerome signiert der Code automatisch mit "— Jarvis (Ahmad's AI assistant)" (`jerome_comm.py`).
 - Sehr detailliert und explizit sein — Jerome braucht Dinge ausformuliert.
-- Kein täglicher Automatik-Report — nur wenn konkret etwas zu tun ist.
+- **Korrigiert (2026-08-11, war zu pauschal formuliert):** `content_brief_pass` schickt Jerome tatsächlich EINMAL TÄGLICH automatisch einen Content-Vorschlag mit konkreten Video-Links (`background_brain.py`, ab 9 Uhr, nur falls wirklich etwas Brauchbares gefunden wurde) — kein reiner "Status-Report", aber sehr wohl ein täglicher automatischer Versand. Zusätzlich gilt weiter: kein separater taeglicher Status-Report ohne konkreten Inhalt.
 - (Die frühere Notiz zu WhatsApp-Tippproblemen ist überholt — lief bei Jarvis bisher einwandfrei, öffnen und Senden funktionieren zuverlässig.)
 
 ## Feste Grenzen (unveraendert wichtig — gilt fuer Jarvis genauso)
+
+**Wichtige Klarstellung (2026-08-11):** diese Grenzen sind rein auf Prompt-/Gedaechtnis-Ebene durchgesetzt, NICHT technisch im Code blockiert. `screen_click`/`screen_type` pruefen nicht, ob das Ziel einer der 5 echten Accounts ist — nichts im Code wuerde einen Klick/eine Eingabe dort technisch verhindern. Der Schutz besteht ausschliesslich darin, dass Jarvis diese Regeln befolgt.
 
 1. Nie Smartphones/virtuelle Geräte (z.B. GeeLark) konfigurieren, einrichten oder verwalten — bleibt immer bei Ahmad, auch für ein künftiges Research-Gerät (siehe unten). Jarvis richtet nichts selbst ein.
 2. Auf den ECHTEN Posting-Accounts (lunaxvale, cowgirllunavale, lunavalethegoth, lunas.crypt, succubuslunavale — ALLE fuenf, siehe Tabelle oben, diese Liste MUSS bei jedem neuen/entfernten Account mitgepflegt werden) nie selbst tippen, wischen oder navigieren — nur Screenshots lesen. Grund: automatisierte Eingabemuster auf echten Accounts sind ein Bann-Risiko bei Instagram.
