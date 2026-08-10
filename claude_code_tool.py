@@ -60,9 +60,20 @@ async def _git_sync_server_changes(task: str) -> str:
     try:
         status = await asyncio.create_subprocess_exec(
             "git", "status", "--porcelain", cwd=WORKDIR,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        status_out, _ = await status.communicate()
+        status_out, status_err = await status.communicate()
+        if status.returncode != 0:
+            # Frueher wurde stderr hier verworfen und nur auf leeren stdout
+            # geprueft -- ein fehlgeschlagenes 'git status' (z.B. durch ein
+            # gleichzeitiges 'index.lock' eines anderen Git-Vorgangs) sah
+            # dadurch exakt so aus wie "nichts zu committen": eine echte,
+            # bereits von Claude Code gemachte Aenderung blieb dann still
+            # auf der Platte liegen, nie committet, nie gepusht, ohne dass
+            # irgendwo ein Fehler auftauchte (live vorgefunden, 2026-08-10/11,
+            # finance_tracker.py-Fix mit commit_hash=None trotz vorhandenem Diff).
+            _log(f"GIT-SYNC FEHLER bei 'git status': {status_err.decode(errors='replace')[:300]}")
+            return None
         if not status_out.strip():
             _log("GIT-SYNC: keine Aenderungen, nichts zu committen.")
             return None
@@ -104,12 +115,18 @@ async def run_claude_code_with_commit(task: str, timeout: int = DEFAULT_TIMEOUT)
     config = _load_config()
 
     if IS_SERVER:
+        # "env ANTHROPIC_API_KEY=<key>" als eigenes argv-Element wird von
+        # sudo im Klartext mitprotokolliert (journalctl/syslog, live
+        # bestaetigt 2026-08-11) -- jeder mit Lesezugriff auf die Logs sieht
+        # sonst den echten API-Key. --preserve-env uebernimmt die Variable
+        # stattdessen aus der schon gesetzten Prozess-Umgebung, taucht damit
+        # nicht im geloggten Kommando auf.
         cmd = [
-            "sudo", "-u", CLAUDE_CODE_USER, "-H",
-            "env", f"ANTHROPIC_API_KEY={config['anthropic_api_key']}",
+            "sudo", "--preserve-env=ANTHROPIC_API_KEY", "-u", CLAUDE_CODE_USER, "-H",
             CLAUDE_BIN, "-p", task, "--dangerously-skip-permissions",
         ]
         env = os.environ.copy()
+        env["ANTHROPIC_API_KEY"] = config["anthropic_api_key"]
     else:
         cmd = [CLAUDE_BIN, "-p", task, "--dangerously-skip-permissions"]
         env = {**os.environ, "ANTHROPIC_API_KEY": config["anthropic_api_key"]}

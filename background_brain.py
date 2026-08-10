@@ -1031,7 +1031,30 @@ async def self_improve_pass(config: dict):
     # unterbrechen (bleibt bewusst still, siehe Docstring oben).
     memory.add_self_improve_entry("\n".join(errors[-30:]), result, commit_hash)
 
+    # VOR dem moeglichen Neustart unten (der diesen Prozess selbst killt) --
+    # sonst wuerde die Lektion bei jedem erfolgreichen Fix verloren gehen.
     await _reflect_on_fix(config, errors, result)
+
+    if commit_hash and IS_SERVER:
+        # Ohne das hier bleibt eine erfolgreiche Korrektur wirkungslos: Python
+        # importiert Module einmal beim Start, ein geaendertes .py auf der
+        # Platte aendert nichts am laufenden Prozess. Beide Dienste neu
+        # starten (nicht nur jarvis-brain), weil die Korrektur auch ein von
+        # server.py mitgenutztes Modul betroffen haben kann (z.B. memory.py) —
+        # live vorgefunden, 2026-08-10/11: ein echter, korrekter Fix haette ohne
+        # das hier nie wirklich gegriffen, selbst nach erfolgreichem Commit.
+        # Reihenfolge bewusst: jarvis-server zuerst, jarvis-brain zuletzt --
+        # der Neustart von jarvis-brain killt diesen Prozess selbst.
+        for service in ("jarvis-server", "jarvis-brain"):
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "systemctl", "restart", service,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.communicate()
+                _log(f"Self-Improve: {service} neu gestartet (Fix aus Commit {commit_hash}).")
+            except Exception as e:
+                _log(f"Self-Improve: Neustart von {service} fehlgeschlagen: {_exc(e)}")
 
 
 async def _reflect_on_fix(config: dict, errors: list, fix_result: str):
