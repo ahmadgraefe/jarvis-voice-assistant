@@ -4,13 +4,19 @@ Stand: 2026-08-10 (korrigiert — siehe "Datenquellen" unten, Insights-Workflow 
 
 ## Worum es geht
 
-Ahmad betreibt drei Instagram-Personas unter der Marke "Luna Vale":
+Ahmad betreibt fünf Instagram-Personas unter der Marke "Luna Vale" (Stand 2026-08-09 — zwei neue seit der ursprünglichen drei dazugekommen):
 
 | Account | Persona | Status |
 |---|---|---|
 | lunaxvale | Luna Vale — dark feminine / alt-goth (Hauptaccount) | Aktiv, etabliert |
 | cowgirllunavale | Cowgirl / Country-Girl | Aktiv, 46 Posts, 527 Follower |
 | lunavalethegoth | Cosplay (Handle irreführend — ist der Cosplay-Account) | Aktiv, 73 Posts, 4.578 Follower |
+| lunas.crypt | Neu seit 2026-08-09, laut Ahmad "läuft aktuell fantastisch" — genaue Persona/Follower noch nicht dokumentiert | Aktiv |
+| succubuslunavale | Neu seit 2026-08-09, laut Ahmad "läuft aktuell fantastisch" — genaue Persona/Follower noch nicht dokumentiert | Aktiv |
+
+Erfolgsrezept der beiden neuen Accounts: kopieren stark den Content-Stil von @gothgirlenya (getrackter Konkurrent), konkret Outfit-Switch/Outfit-Transition-Content.
+
+**Details zu lunas.crypt/succubuslunavale sind bewusst unvollständig — Ahmad sollte Persona-Beschreibung, Follower-Zahlen und Content-Stimme ergänzen, sobald Zeit ist, damit Jarvis sie genauso gut kennt wie die ersten drei.**
 
 ## Rollenverteilung
 
@@ -22,7 +28,7 @@ Ahmad betreibt drei Instagram-Personas unter der Marke "Luna Vale":
 
 Link: https://docs.google.com/spreadsheets/d/1VvQpaYSUF668MQjr-w7VYwiThQozXmR3zdruw5C_V08/edit — natives Google Sheet, komplett auf Englisch (Jerome spricht nur Englisch).
 
-Tabs: Accounts Overview, Instructions, Daily Production List, Winner Tracking, Link Funnel, Scaling Log, Trial Reel Waves, Target Creator List. Eine gemeinsame Tab-Struktur für alle 3 Accounts (unterschieden über "Account"-Spalte).
+Tabs: Accounts Overview, Instructions, Daily Production List, Winner Tracking, Link Funnel, Scaling Log, Trial Reel Waves, Target Creator List, Insights Eingang. Eine gemeinsame Tab-Struktur für alle Accounts (unterschieden über "Account"-Spalte) — bewusst als "alle Accounts" statt einer festen Zahl formuliert, damit das nicht bei jedem neuen Account veraltet.
 
 **Seit 2026-08-05: direkter Live-Schreibzugriff** über die Sheets API — kein Download/Import/Menschen-Klick mehr nötig, Jarvis schreibt direkt und sofort.
 
@@ -78,7 +84,7 @@ Trial Reels: exakt 3h nach Posten. Hauptfeed-Posts: ~3h (früher Indikator) UND 
 ## Feste Grenzen (unveraendert wichtig — gilt fuer Jarvis genauso)
 
 1. Nie Smartphones/virtuelle Geräte (z.B. GeeLark) konfigurieren, einrichten oder verwalten — bleibt immer bei Ahmad, auch für ein künftiges Research-Gerät (siehe unten). Jarvis richtet nichts selbst ein.
-2. Auf den ECHTEN Posting-Accounts (lunaxvale, cowgirllunavale, lunavalethegoth) nie selbst tippen, wischen oder navigieren — nur Screenshots lesen. Grund: automatisierte Eingabemuster auf echten Accounts sind ein Bann-Risiko bei Instagram.
+2. Auf den ECHTEN Posting-Accounts (lunaxvale, cowgirllunavale, lunavalethegoth, lunas.crypt, succubuslunavale — ALLE fuenf, siehe Tabelle oben, diese Liste MUSS bei jedem neuen/entfernten Account mitgepflegt werden) nie selbst tippen, wischen oder navigieren — nur Screenshots lesen. Grund: automatisierte Eingabemuster auf echten Accounts sind ein Bann-Risiko bei Instagram.
    - **Ausnahme (Zukunft, siehe unten):** auf einem separaten, von Ahmad eingerichteten GeeLark-Research-Gerät mit einem reinen Content-Research-Account (kein wichtiger/echter Posting-Account) darf Jarvis selbst tippen und scrollen.
 3. Nie Zugangsdaten/Passwörter für Instagram oder andere Dienste eingeben oder verwalten.
 4. Nie bei Aufbau von Multi-Account-Ban-Evasion-Infrastruktur helfen (Proxies, SIM/Geräte-Warmup, Ban-Recovery, Detection-Evasion-Link-Anbieter) — nur Analyse und Content-Strategie.
