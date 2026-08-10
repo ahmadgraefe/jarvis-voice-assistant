@@ -832,6 +832,11 @@ class ToolSpec:
     handler: object  # async def handler(args: dict) -> str
     speak_result: bool = True
     slow: bool = False
+    verbose_reply: bool = False  # naechste Antwortrunde bekommt mehr als die
+    # sonst hart auf 250 gedeckelten Tokens (siehe process_message_native) --
+    # fuer Tools deren Ergebnis (z.B. ein 5-Berater-Boardroom-Verdict) sich
+    # nicht in ein, zwei Saetzen sinnvoll zusammenfassen laesst, ohne die
+    # Antwort mitten im Satz abzuschneiden (live beobachtet, 2026-08-11).
 
 
 async def _tool_screen(args: dict) -> str:
@@ -1887,6 +1892,7 @@ TOOL_REGISTRY: dict = {
         handler=_tool_delegate_subagents,
         speak_result=True,
         slow=True,
+        verbose_reply=True,
     ),
     "simulate_decision": ToolSpec(
         schema={
@@ -1916,6 +1922,7 @@ TOOL_REGISTRY: dict = {
         handler=_tool_simulate_decision,
         speak_result=True,
         slow=True,
+        verbose_reply=True,
     ),
     "boardroom": ToolSpec(
         schema={
@@ -1949,6 +1956,7 @@ TOOL_REGISTRY: dict = {
         handler=_tool_boardroom,
         speak_result=True,
         slow=True,
+        verbose_reply=True,
     ),
     "news": ToolSpec(
         schema={
@@ -2838,6 +2846,7 @@ async def process_message_native(session_id: str, user_text: str, ws: WebSocket)
     conversations[session_id].append({"role": "user", "content": user_text})
     memory.append_turn("user", user_text)
 
+    reply_max_tokens = 250
     for round_num in range(MAX_TOOL_ROUNDS):
         # Echtzeit-Sprachpfad: Claude-Antwort satzweise streamen statt auf die
         # komplette Antwort zu warten — jeder fertige Satz geht sofort per
@@ -2854,7 +2863,7 @@ async def process_message_native(session_id: str, user_text: str, ws: WebSocket)
         try:
             async with ai.messages.stream(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=250,
+                max_tokens=reply_max_tokens,
                 system=build_system_blocks(native=True, query=user_text),
                 tools=TOOLS,
                 messages=_safe_recent_history(session_id),
@@ -2902,6 +2911,14 @@ async def process_message_native(session_id: str, user_text: str, ws: WebSocket)
 
         if not tool_use_blocks:
             return  # (a) einfache Antwort ohne Tool-Aufruf — fertig
+
+        # Ergebnisse wie ein Boardroom-Verdict lassen sich nicht in 250 Tokens
+        # zusammenfassen, ohne mitten im Satz abzuschneiden (live beobachtet,
+        # 2026-08-11) — die naechste Runde (die genau dieses Tool-Ergebnis
+        # verarbeitet) bekommt dann mehr Luft.
+        reply_max_tokens = 600 if any(
+            (TOOL_REGISTRY.get(b.name) and TOOL_REGISTRY[b.name].verbose_reply) for b in tool_use_blocks
+        ) else 250
 
         results = await asyncio.gather(*(_run_tool(b) for b in tool_use_blocks))
         for r in results:
