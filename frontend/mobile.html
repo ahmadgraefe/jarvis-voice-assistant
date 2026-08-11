@@ -54,7 +54,7 @@
         </main>
 
         <div id="cockpit-view" class="tab-view">
-            <iframe id="cockpit-frame" src="/cockpit" title="Cockpit"></iframe>
+            <iframe id="cockpit-frame" src="/cockpit?embed=1" title="Cockpit"></iframe>
         </div>
 
         <nav id="tabbar">
@@ -73,6 +73,9 @@
         <video id="camera-video" autoplay playsinline muted></video>
         <canvas id="camera-canvas" class="hidden"></canvas>
         <div id="camera-result"></div>
+        <button id="camera-ask" aria-label="Halten zum Fragen">
+            <svg viewBox="0 0 24 24"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M19 11a7 7 0 0 1-14 0M12 18v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
         <button id="camera-close" aria-label="Kamera schliessen">✕</button>
     </div>
 

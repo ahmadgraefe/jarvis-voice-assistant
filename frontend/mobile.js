@@ -31,6 +31,8 @@ let currentAudio = null;
 let audioCtx = null;
 let analyser = null;
 let audioLevelData = null;
+let vizSourceNode = null;
+let bargeInArmedAt = 0;
 
 const STATUS_IDLE = 'verbunden';
 
@@ -58,14 +60,23 @@ function primeResponseAudio() {
 }
 
 function ensureAudioContext() {
-    if (audioCtx) return;
+    if (audioCtx) {
+        // iOS legt den Context nach Hintergrund/Sperre gern schlafen und weckt
+        // ihn nie von selbst -- main.js macht dasselbe Resume schon (Desktop).
+        if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+        return;
+    }
     try {
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         analyser = audioCtx.createAnalyser();
         analyser.fftSize = 256;
         analyser.smoothingTimeConstant = 0.75;
         audioLevelData = new Uint8Array(analyser.frequencyBinCount);
-        analyser.connect(audioCtx.destination);
+        // BEWUSST kein analyser.connect(audioCtx.destination) -- analyser
+        // bekommt unten in startVisualizationTap() einen echten, aber rein
+        // lesenden Zweig (nie an destination weitergereicht). Eine Verbindung
+        // hierhin wuerde diesen Zweig ein zweites Mal hoerbar machen (Echo).
+        window.__jarvisAudioAnalyser = analyser; // orb.js liest hier mit
     } catch (e) { /* non-fatal */ }
 }
 
@@ -185,6 +196,7 @@ function playNext() {
     const blob = new Blob([bytes], { type: 'audio/mpeg' });
     const url = URL.createObjectURL(blob);
     currentAudio = responseAudio;
+    startVisualizationTap(bytes.buffer.slice(0));
 
     // Bewusst OHNE Web-Audio-Graph (kein createMediaElementSource/Analyser)
     // — das hier ist die tatsaechliche Sprachausgabe, die MUSS zuverlaessig
@@ -194,6 +206,8 @@ function playNext() {
     // deutlich zuverlaessiger bei Push-to-Talk (langer Rundlauf: Aufnahme
     // + Hochladen + Transkription + LLM-Antwort, das Zeitfenster in dem
     // WebKit programmatisches Abspielen noch erlaubt kann dabei ablaufen).
+    // Fuers Orb-Pulsieren und den Barge-in-Schwellwert gibt es stattdessen
+    // startVisualizationTap() oben: ein komplett separater, stummer Zweig.
     responseAudio.onended = () => { URL.revokeObjectURL(url); playNext(); };
     responseAudio.onerror = () => { URL.revokeObjectURL(url); playNext(); };
     responseAudio.src = url;
@@ -206,8 +220,43 @@ function playNext() {
     });
 }
 
+// Separater, rein lesender Analyse-Zweig fuer denselben Audio-Inhalt, den
+// responseAudio gerade hoerbar abspielt -- dekodiert dieselben Bytes NOCH
+// EINMAL unabhaengig und speist NUR den Analyser (nie audioCtx.destination,
+// sonst waere das ein zweites, hoerbares Echo). Zwei Dinge haengen daran:
+// (1) der Orb bekommt darueber echte Amplituden-Daten statt nur den
+// zustandsbasierten Sprung (siehe orb.js readAudioLevel/__jarvisAudioAnalyser),
+// (2) pollVad() bekommt einen echten "wie laut ist Jarvis gerade"-Wert statt
+// permanent 0, damit die Schwelle beim Barge-in wie urspruenglich gedacht
+// mit der eigenen Lautstaerke mitwaechst (Echo vom Lautsprecher soll nicht
+// als Unterbrechung zaehlen). decodeAudioData braucht ein paar zehntel ms --
+// bewusst kein Warten darauf, responseAudio.play() startet unabhaengig davon.
+function startVisualizationTap(arrayBuffer) {
+    try {
+        ensureAudioContext();
+        if (!audioCtx || !analyser) return;
+        audioCtx.decodeAudioData(arrayBuffer, (audioBuffer) => {
+            stopVisualizationTap();
+            try {
+                vizSourceNode = audioCtx.createBufferSource();
+                vizSourceNode.buffer = audioBuffer;
+                vizSourceNode.connect(analyser);
+                vizSourceNode.start(0);
+            } catch (e) { /* non-fatal — Orb bleibt diese Runde zustandsbasiert */ }
+        }, () => { /* Decode fehlgeschlagen — non-fatal, echte Wiedergabe laeuft unabhaengig weiter */ });
+    } catch (e) { /* non-fatal */ }
+}
+
+function stopVisualizationTap() {
+    if (vizSourceNode) {
+        try { vizSourceNode.stop(); } catch (e) { /* war ggf. nie gestartet, non-fatal */ }
+        vizSourceNode = null;
+    }
+}
+
 function stopEverything() {
     stopBargeInWatch();
+    stopVisualizationTap();
     if (currentAudio) currentAudio.pause();
     audioQueue = [];
     isPlaying = false;
@@ -265,6 +314,7 @@ const cameraVideo = document.getElementById('camera-video');
 const cameraCanvas = document.getElementById('camera-canvas');
 const cameraResult = document.getElementById('camera-result');
 const cameraCloseBtn = document.getElementById('camera-close');
+const cameraAskBtn = document.getElementById('camera-ask');
 
 const CAMERA_ANALYZE_INTERVAL_MS = 1750;
 const CAMERA_AUTO_STOP_MS = 90000;
@@ -296,13 +346,20 @@ function closeCamera() {
     if (cameraTimer) { clearInterval(cameraTimer); cameraTimer = null; }
     if (cameraStopTimer) { clearTimeout(cameraStopTimer); cameraStopTimer = null; }
     if (cameraStream) { cameraStream.getTracks().forEach((t) => t.stop()); cameraStream = null; }
+    if (cameraAskStream) { cameraAskStream.getTracks().forEach((t) => t.stop()); cameraAskStream = null; }
+    cameraAskBtn.classList.remove('recording');
     cameraOverlay.classList.add('hidden');
     cameraResult.textContent = '';
 }
 
-async function analyzeCameraFrame() {
-    if (cameraBusy || !cameraStream || cameraVideo.videoWidth === 0) return;
-    cameraBusy = true;
+// Gemeinsamer Kern fuer beide Aufrufer unten: der 1.75s-Automatik-Takt (ohne
+// question) und der Zuruf-Modus (mit question, siehe startCameraAsk weiter
+// unten) -- nimmt den AKTUELLEN Frame, schickt ihn (plus optionale Frage) an
+// /analyze-frame, zeigt+spricht die Antwort. Verwaltet cameraBusy bewusst
+// NICHT selbst (macht jeder Aufrufer passend zu seiner eigenen Lebensdauer,
+// siehe analyzeCameraFrame vs. onCameraAskStop).
+async function captureAndAnalyzeFrame(question) {
+    if (!cameraStream || cameraVideo.videoWidth === 0) return;
     try {
         cameraCanvas.width = cameraVideo.videoWidth;
         cameraCanvas.height = cameraVideo.videoHeight;
@@ -311,6 +368,7 @@ async function analyzeCameraFrame() {
         if (!blob) return;
         const form = new FormData();
         form.append('frame', blob, 'frame.jpg');
+        if (question) form.append('question', question);
         const res = await fetch('/analyze-frame', { method: 'POST', body: form });
         const data = await res.json();
         if (!cameraStream) return; // in der Zwischenzeit geschlossen
@@ -324,7 +382,15 @@ async function analyzeCameraFrame() {
             a.play().catch(() => {});
         }
     } catch (e) {
-        // best effort — naechster Takt versucht es erneut
+        // best effort — naechster Takt (bzw. die naechste Frage) versucht es erneut
+    }
+}
+
+async function analyzeCameraFrame() {
+    if (cameraBusy || !cameraStream || cameraVideo.videoWidth === 0) return;
+    cameraBusy = true;
+    try {
+        await captureAndAnalyzeFrame();
     } finally {
         cameraBusy = false;
     }
@@ -332,6 +398,72 @@ async function analyzeCameraFrame() {
 
 iconCamera.addEventListener('click', () => { primeResponseAudio(); openCamera(); });
 cameraCloseBtn.addEventListener('click', closeCamera);
+
+// ---------------------------------------------------------------------------
+// Kamera-Zuruf-Modus (2026-08-12, Ahmad: "es sollte auf Zuruf sein... ist das
+// Produkt gesund?") — Halten-zum-Fragen waehrend die Kamera offen ist, GENAU
+// dasselbe Geste-Set wie der normale talkBtn weiter unten (touchcancel/
+// mouseleave sind echte, schon einmal reparierte iOS-Bugs, nicht neu erfinden).
+// Der Mikrofon-Stream wird beim ERSTEN Tastendruck geholt und bis zum
+// Schliessen der Kamera warmgehalten (nicht pro Frage neu angefragt) -- ein
+// zweiter aktiver Stream (Kamera=Video, hier=Audio) waehrend dessen
+// wiederholtem Auf/Ab ist auf iOS ein bekanntes Risiko fuer kurze Aussetzer
+// in der Kamera-Vorschau.
+// ---------------------------------------------------------------------------
+let cameraAskStream = null;
+let cameraAskRecorder = null;
+let cameraAskChunks = [];
+
+async function startCameraAsk() {
+    if (!cameraStream || cameraAskBtn.classList.contains('recording')) return;
+    primeResponseAudio();
+    cameraBusy = true; // Automatik-Takt pausiert fuer die Dauer der Frage
+    if (!cameraAskStream) {
+        try {
+            cameraAskStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } catch (e) {
+            cameraBusy = false;
+            return;
+        }
+    }
+    cameraAskChunks = [];
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+    cameraAskRecorder = mimeType ? new MediaRecorder(cameraAskStream, { mimeType }) : new MediaRecorder(cameraAskStream);
+    cameraAskRecorder.ondataavailable = (e) => { if (e.data.size > 0) cameraAskChunks.push(e.data); };
+    cameraAskRecorder.onstop = onCameraAskStop;
+    cameraAskRecorder.start();
+    cameraAskBtn.classList.add('recording');
+}
+
+function stopCameraAsk() {
+    if (cameraAskRecorder && cameraAskRecorder.state === 'recording') cameraAskRecorder.stop();
+    cameraAskBtn.classList.remove('recording');
+}
+
+async function onCameraAskStop() {
+    try {
+        if (cameraAskChunks.length === 0) return;
+        const blob = new Blob(cameraAskChunks, { type: cameraAskChunks[0].type || 'audio/webm' });
+        const form = new FormData();
+        form.append('audio', blob, 'question.webm');
+        const res = await fetch('/transcribe', { method: 'POST', body: form });
+        const data = await res.json();
+        if (!data.text || !data.text.trim()) return;
+        cameraResult.textContent = 'Ich schau mal...';
+        await captureAndAnalyzeFrame(data.text.trim());
+    } catch (e) {
+        // best effort
+    } finally {
+        cameraBusy = false;
+    }
+}
+
+cameraAskBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startCameraAsk(); }, { passive: false });
+cameraAskBtn.addEventListener('touchend', (e) => { e.preventDefault(); stopCameraAsk(); }, { passive: false });
+cameraAskBtn.addEventListener('touchcancel', (e) => { e.preventDefault(); stopCameraAsk(); }, { passive: false });
+cameraAskBtn.addEventListener('mousedown', startCameraAsk);
+cameraAskBtn.addEventListener('mouseup', stopCameraAsk);
+cameraAskBtn.addEventListener('mouseleave', () => { if (cameraAskRecorder && cameraAskRecorder.state === 'recording') stopCameraAsk(); });
 
 // ---------------------------------------------------------------------------
 // Barge-in (Roadmap Punkt 20) — gleiches Prinzip wie main.js (Mac): waehrend
@@ -346,10 +478,21 @@ cameraCloseBtn.addEventListener('click', closeCamera);
 // denselben Weg wie sonst (Hochladen, Transkription, Antwort) — das kostet
 // dort ein bis zwei Sekunden extra, das Unterbrechen selbst aber nicht.
 // ---------------------------------------------------------------------------
-const VAD_MIN_ABSOLUTE = 0.05;
+// Werte 2026-08-12 nach oben angepasst (waren 1:1 von main.js/Mac uebernommen,
+// aber ein Handy hat eine ganz andere Lautsprecher-Mikrofon-Geometrie -- das
+// Echo der eigenen Stimme loeste den Boden-Schwellwert leicht aus, siehe
+// startVisualizationTap() oben fuer den eigentlichen Fix. Diese Werte sind ein
+// erster plausibler Wurf, keine endgueltig kalibrierte Zahl -- muss am echten
+// Handy noch nachjustiert werden.
+const VAD_MIN_ABSOLUTE = 0.09;
 const VAD_BLEED_FACTOR = 1.4;
-const VAD_SUSTAIN_MS = 280;
+const VAD_SUSTAIN_MS = 380;
 const VAD_POLL_MS = 40;
+// Kurze Anlaufzeit nach Start des Waechters, in der NICHT ausgeloest wird --
+// deckt das Zeitfenster ab in dem decodeAudioData() in startVisualizationTap()
+// noch nicht fertig ist (echte Analyser-Daten fehlen also noch) UND der
+// TTS-Einsatz meist am lautesten ist, also genau der anfaelligste Moment.
+const VAD_ARM_DELAY_MS = 200;
 
 let vadStream = null;
 let vadAnalyser = null;
@@ -379,6 +522,7 @@ async function startBargeInWatch() {
         vadData = new Uint8Array(vadAnalyser.frequencyBinCount);
         src.connect(vadAnalyser);
         vadAboveSince = null;
+        bargeInArmedAt = performance.now() + VAD_ARM_DELAY_MS;
         vadTimer = setInterval(pollVad, VAD_POLL_MS);
     } catch (e) {
         console.warn('[jarvis] Barge-in: Mikrofon nicht verfuegbar', e);
@@ -395,6 +539,7 @@ function stopBargeInWatch() {
 
 function pollVad() {
     if (!isPlaying || !vadStream) return;
+    if (performance.now() < bargeInArmedAt) return;
     const mic = vadLevel();
     const speakerLevel = getAudioLevel();
     const threshold = Math.max(VAD_MIN_ABSOLUTE, speakerLevel * VAD_BLEED_FACTOR);
@@ -412,6 +557,7 @@ function pollVad() {
 
 function triggerBargeIn() {
     stopBargeInWatch();
+    stopVisualizationTap();
     if (currentAudio) currentAudio.pause();
     audioQueue = [];
     isPlaying = false;
@@ -620,3 +766,21 @@ if ('serviceWorker' in navigator) {
         } catch (e) { /* still lassen, Button bleibt als Fallback sichtbar */ }
     }).catch(() => {});
 }
+
+// ---------------------------------------------------------------------------
+// Aufraeumen wenn die Seite in den Hintergrund geht (Tab-Wechsel, App-
+// Wechsel, Sperrbildschirm) — Safari beendet aktive getUserMedia-Streams beim
+// Hintergrund NICHT von selbst. Ohne das koennten Kamera/Mikrofon lange nach
+// dem eigentlichen Gebrauch weiterlaufen (Akku, und die Mikrofon-Anzeige von
+// iOS bliebe scheinbar grundlos aktiv).
+// ---------------------------------------------------------------------------
+function releaseAllStreamsOnHide() {
+    if (document.hidden) {
+        closeCamera();
+        stopBargeInWatch();
+        stopVisualizationTap();
+        if (mediaRecorder && mediaRecorder.state === 'recording') stopRecording();
+    }
+}
+document.addEventListener('visibilitychange', releaseAllStreamsOnHide);
+window.addEventListener('pagehide', releaseAllStreamsOnHide);

@@ -3,8 +3,8 @@
   "short_name": "Jarvis",
   "start_url": "/mobile",
   "display": "standalone",
-  "background_color": "#0f0c0a",
-  "theme_color": "#0f0c0a",
+  "background_color": "#faf3ea",
+  "theme_color": "#faf3ea",
   "orientation": "portrait",
   "icons": [
     { "src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png" },

@@ -268,3 +268,30 @@ body {
     font-size: 16px;
     cursor: pointer;
 }
+/* Halten-zum-Fragen waehrend die Kamera laeuft ("ist das gesund?" statt nur
+   der automatischen Bildunterschrift alle ~1.75s) -- feste Position, bewusst
+   NICHT an #camera-result gekoppelt, damit ein laengerer Antworttext den
+   Button nie verdeckt/verschiebt. */
+#camera-ask {
+    position: absolute;
+    left: 50%;
+    bottom: calc(132px + env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    width: 58px; height: 58px;
+    border-radius: 50%;
+    border: none;
+    background: #FF8A2E;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 6px 18px rgba(255, 138, 46, 0.45);
+    cursor: pointer;
+    z-index: 5;
+}
+#camera-ask svg { width: 24px; height: 24px; }
+#camera-ask.recording {
+    background: #E24B3C;
+    box-shadow: 0 6px 18px rgba(226, 75, 60, 0.5);
+    animation: pulse-rec 1.1s ease-in-out infinite;
+}

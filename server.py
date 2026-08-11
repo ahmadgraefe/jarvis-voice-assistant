@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 import anthropic
 import httpx
-from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -3885,19 +3885,44 @@ async def health_import(payload: dict):
 
 
 @app.post("/analyze-frame")
-async def analyze_frame(frame: UploadFile = File(...)):
+async def analyze_frame(frame: UploadFile = File(...), question: str = Form(None)):
     """Handy-Kamera-Live-Erkennung (2026-08-11, Ahmad, Vorbild fremder Jarvis-
     App): EIN Kamera-Frame rein, eine kurze Beschreibung + gesprochene Antwort
     zurueck. Bewusst KEINE echte 30fps-Videoanalyse (mobile.js schickt hoechstens
     alle ~1.75s ein Bild) -- fuehlt sich durch den kurzen Takt trotzdem live an.
     Gleiches Vision-Modell/Prinzip wie screen_capture.describe_screen. Ehrliche
     Antwort statt Raten wenn das Bild unklar ist (Projekt-Konvention, siehe
-    z.B. browser_extract/READINSIGHTS)."""
+    z.B. browser_extract/READINSIGHTS).
+
+    Optionales `question` (2026-08-12, Ahmad: "es sollte auf Zuruf sein... ist
+    das Produkt gesund?"): Zuruf-Modus per Halten-zum-Fragen-Knopf im Kamera-
+    Overlay (mobile.js), ersetzt fuer DIESEN einen Aufruf die generische
+    Bildunterschrift durch eine gezielte Antwort auf genau diese Frage."""
     frame_bytes = await frame.read()
     b64 = base64.b64encode(frame_bytes).decode("utf-8")
     media_type = frame.content_type if frame.content_type in (
         "image/jpeg", "image/png", "image/gif", "image/webp"
     ) else "image/jpeg"
+    question = (question or "").strip()
+    if question:
+        prompt_text = (
+            f'Ein Live-Kamera-Bild von Ahmads Handy. Er fragt dazu: "{question}". '
+            "Beantworte GENAU diese Frage in einem kurzen, natuerlichen Satz auf "
+            "Deutsch, bezogen auf das was im Bild zu sehen ist. Falls Naehrwerte/"
+            "Text auf dem Bild lesbar und fuer die Frage relevant sind, nenne sie "
+            "kurz mit. Wenn du im Bild nicht sicher genug erkennst was fuer die "
+            "Frage noetig waere: sag das ehrlich statt zu raten. Keine Einleitung, "
+            "direkt antworten."
+        )
+    else:
+        prompt_text = (
+            "Ein Live-Kamera-Bild von Ahmads Handy. Beschreibe in EINEM kurzen, "
+            "natuerlichen Satz auf Deutsch was im Zentrum des Bildes zu sehen ist "
+            "(z.B. welches Produkt/Objekt). Falls Text auf dem Bild lesbar ist (z.B. "
+            "Naehrwerte, Marke, Beschriftung), nenne die wichtigsten lesbaren Angaben "
+            "kurz mit. Wenn unklar/unscharf: sag ehrlich dass du es nicht sicher "
+            "erkennst, statt zu raten. Keine Einleitung, direkt die Beschreibung."
+        )
     try:
         response = await ai.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -3906,14 +3931,7 @@ async def analyze_frame(frame: UploadFile = File(...)):
                 "role": "user",
                 "content": [
                     {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
-                    {"type": "text", "text": (
-                        "Ein Live-Kamera-Bild von Ahmads Handy. Beschreibe in EINEM kurzen, "
-                        "natuerlichen Satz auf Deutsch was im Zentrum des Bildes zu sehen ist "
-                        "(z.B. welches Produkt/Objekt). Falls Text auf dem Bild lesbar ist (z.B. "
-                        "Naehrwerte, Marke, Beschriftung), nenne die wichtigsten lesbaren Angaben "
-                        "kurz mit. Wenn unklar/unscharf: sag ehrlich dass du es nicht sicher "
-                        "erkennst, statt zu raten. Keine Einleitung, direkt die Beschreibung."
-                    )},
+                    {"type": "text", "text": prompt_text},
                 ],
             }],
         )
@@ -3925,6 +3943,18 @@ async def analyze_frame(frame: UploadFile = File(...)):
     if not text:
         return {"text": "", "audio": ""}
 
+    # Nur der gezielte Zuruf landet im Gespraechsgedaechtnis (append_turn fuellt
+    # get_recent_history(), die bei JEDEM normalen Turn in den System-Prompt
+    # geht) -- so kann Ahmad danach im normalen Gespraech natuerlich nachfragen
+    # ("trag das ein"). Der 1.75s-Automatik-Takt wuerde mit max. 30 Turns das
+    # kurzfristige Gespraechsfenster fluten, bleibt darum bewusst aussen vor.
+    if question:
+        try:
+            memory.append_turn("user", f"[Kamera] {question}")
+            memory.append_turn("assistant", text)
+        except Exception as e:
+            print(f"[analyze-frame] memory.append_turn Fehler: {e}", flush=True)
+
     try:
         audio_bytes = await synthesize_speech(text)
         audio_b64 = base64.b64encode(audio_bytes).decode("utf-8") if audio_bytes else ""
@@ -3933,6 +3963,24 @@ async def analyze_frame(frame: UploadFile = File(...)):
         audio_b64 = ""
 
     return {"text": text, "audio": audio_b64}
+
+
+_NON_SPEECH_BRACKET_RE = re.compile(r"[\[(][^\])]*[\])]")
+_NON_SPEECH_PUNCT_RE = re.compile(r"[\s.,!?…\-–—]+")
+
+
+def _looks_like_real_speech(text: str) -> bool:
+    """ElevenLabs Scribe gibt bei Umgebungsgeraeuschen/Stille oft NUR einen
+    Klammer-Platzhalter zurueck ('(background noise)', '[clicking]',
+    '[pause]') statt echter Sprache. Ungefiltert wurde das live als woertliche
+    Nutzer-Aussage an Jarvis weitergereicht (Ahmad, 2026-08-12: fuehrte zu
+    Unsinn-Antworten und einem ungewollten Tool-Aufruf, ausgeloest durch
+    '[clicking]'). Entfernt alle Klammer-Gruppen + Satzzeichen, prueft ob
+    danach noch echter Wortinhalt uebrig bleibt -- robuster als eine Regex,
+    die exakt auf das heutige Klammer-Format des STT-Anbieters passen muesste."""
+    stripped = _NON_SPEECH_BRACKET_RE.sub("", text)
+    stripped = _NON_SPEECH_PUNCT_RE.sub("", stripped)
+    return bool(stripped)
 
 
 @app.post("/transcribe")
@@ -3951,7 +3999,10 @@ async def transcribe_audio(audio: UploadFile = File(...)):
             )
             r.raise_for_status()
             data = r.json()
-        return {"text": data.get("text", "")}
+        text = data.get("text", "")
+        if text and not _looks_like_real_speech(text):
+            text = ""
+        return {"text": text}
     except Exception as e:
         print(f"[transcribe] Fehler: {e}", flush=True)
         return {"text": "", "error": str(e)}

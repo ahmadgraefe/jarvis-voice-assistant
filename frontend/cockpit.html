@@ -4,6 +4,15 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ahmads Cockpit</title>
+<script>
+// Eingebettet in mobile.html per iframe (?embed=1) -- Klasse VOR dem ersten
+// Rendern setzen (synchrones Inline-Script, kein defer), sonst blitzt kurz
+// das dunkle Standard-Theme auf. Eigenstaendiger Aufruf von /cockpit (Desktop,
+// ohne den Parameter) bleibt exakt das dunkle Tony-Stark-HUD von vorher.
+if (new URLSearchParams(location.search).get('embed') === '1') {
+    document.documentElement.classList.add('embed-light');
+}
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -15,6 +24,19 @@
 --color-ok:#7A8A4E;--color-warn:#D9A24E;--color-err:#B14A3A;--color-info:#6FA8C4;
 --border:rgba(242,232,220,0.08);--border-strong:rgba(242,232,220,0.14);
 }
+/* Helles Theme NUR im mobilen Embed (siehe Script oben) -- dieselben Tokens
+   wie mobile.css, damit sich Voice- und Cockpit-Tab wie EINE App anfuehlen
+   statt wie zwei zusammengesteckte. Hoehere Selektor-Spezifitaet als :root
+   allein gewinnt automatisch, Reihenfolge im Stylesheet ist darum egal. */
+html.embed-light{
+--color-bg:#FAF3EA;--color-surface:#FFFFFF;--color-surface-2:#F0E4D3;--color-sidebar-hover:rgba(43,35,28,0.04);
+--color-text:#2B231C;--color-text-2:#6B5A47;--color-text-muted:#9A7B5C;
+--color-accent:#FF8A2E;--color-accent-hover:#E8791F;--color-accent-deep:#B85A1E;--color-accent-soft:rgba(255,138,46,0.12);--color-accent-ring:rgba(255,138,46,0.45);
+--color-ok:#6B7A3E;--color-warn:#B8813A;--color-err:#A33F2F;--color-info:#4E86A3;
+--border:rgba(43,35,28,0.08);--border-strong:rgba(43,35,28,0.14);
+}
+html.embed-light .card{background:rgba(255,255,255,0.7)}
+html.embed-light .hero{background:linear-gradient(120deg,rgba(255,255,255,0.85),rgba(250,243,234,0.5))}
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 body{
@@ -31,7 +53,7 @@ font-size:14px;line-height:1.45;
 ::-webkit-scrollbar-thumb{background:rgba(242,232,220,0.10);border-radius:8px}
 ::-webkit-scrollbar-thumb:hover{background:rgba(242,232,220,0.18)}
 
-.app{display:flex;height:100vh;width:100vw}
+.app{display:flex;height:100vh;height:100dvh;width:100vw}
 .sidebar{
 width:248px;min-width:248px;background:var(--color-surface);
 border-right:1px solid var(--border);display:flex;flex-direction:column;
@@ -174,7 +196,7 @@ svg .anim-bar{transform:scaleY(0);transform-origin:bottom;animation:rise .9s cub
 @media (max-width:600px){
   html,body{height:auto;overflow:visible}
   body{font-size:14px}
-  .app{flex-direction:column;height:auto;min-height:100vh;width:100%}
+  .app{flex-direction:column;height:auto;min-height:100vh;min-height:100dvh;width:100%}
   .sidebar{
     width:100%;min-width:0;height:auto;flex-direction:row;align-items:center;
     gap:4px;padding:10px 12px;border-right:none;border-bottom:1px solid var(--border);
