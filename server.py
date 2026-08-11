@@ -52,15 +52,38 @@ http = httpx.AsyncClient(timeout=30)
 LIVE_EVENT_POLL_SECONDS = 5
 
 
+async def _warmup_embedding_model():
+    """Ahmad, 2026-08-11: das erste echte Gespraech nach jedem Neustart
+    brauchte 10-12s bis zur ersten Antwort, weil semantic_memory's lokales
+    Embedding-Modell (sentence-transformers) bewusst erst beim ersten
+    TATSAECHLICHEN Gebrauch laedt (siehe semantic_memory.py — damit ein
+    kaputtes Modell/eine kaputte Installation den Server-Start nicht
+    blockiert). Restarts sind seit heute haeufiger als vorher (self_improve_
+    pass startet nach einem Fix jetzt automatisch neu), der Kaltstart traf
+    Ahmad dadurch oefter. Laedt das Modell stattdessen schon waehrend des
+    Starts im Hintergrund vor (run_in_executor, das Laden ist synchron/CPU-
+    gebunden). Best effort -- schlaegt es fehl, bleibt der bestehende lazy
+    Fallback beim ersten echten Gebrauch bestehen, kein Hard-Fail."""
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, semantic_memory._get_model)
+        print("  Embedding-Modell vorgeladen, kein Kaltstart beim ersten Gespraech.", flush=True)
+    except Exception as e:
+        print(f"  Embedding-Modell-Vorladen fehlgeschlagen (laedt spaeter lazy nach): {e}", flush=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # _live_events_poll_loop is defined later in this file (near _speak) —
-    # safe forward reference, this only actually runs at server startup,
-    # long after the whole module has finished loading (same pattern
-    # already used for NATIVE_STATIC_INSTRUCTIONS elsewhere in this file).
+    # _live_events_poll_loop ist spaeter in dieser Datei definiert (nahe
+    # _speak) — sichere Vorwaerts-Referenz, laeuft erst beim tatsaechlichen
+    # Server-Start, lange nachdem das ganze Modul fertig geladen ist
+    # (gleiches Muster wie schon bei NATIVE_STATIC_INSTRUCTIONS anderswo in
+    # dieser Datei). Gleiches gilt fuer _warmup_embedding_model/semantic_memory.
     task = asyncio.create_task(_live_events_poll_loop())
+    warmup_task = asyncio.create_task(_warmup_embedding_model())
     yield
     task.cancel()
+    warmup_task.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -375,7 +398,11 @@ async def _synthesize_chunk(chunk: str, attempt: int = 1) -> bytes:
                 "Accept": "audio/mpeg",
             }, json={
                 "text": chunk,
-                "model_id": "eleven_turbo_v2_5",
+                # Ahmad, 2026-08-11: Tempo hat Vorrang vor der letzten Nuance
+                # Stimmqualitaet -- eleven_flash_v2_5 ist ElevenLabs' schnellstes
+                # Modell (~75ms Modell-Latenz statt turbo's ~250-300ms), genau
+                # das haeufigste Feedback war "zu langsam", nicht "klingt komisch".
+                "model_id": "eleven_flash_v2_5",
                 "voice_settings": {"stability": 0.5, "similarity_boost": 0.85, "speed": 1.2},
             })
             print(f"  TTS chunk status: {resp.status_code}, size: {len(resp.content)}", flush=True)
