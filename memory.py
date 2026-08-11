@@ -868,11 +868,30 @@ _KNOWN_HEALTH_METRIC_FIELDS = {
     "active_energy": ("qty", "value"),
 }
 
+# Live vorgefunden (2026-08-11, Ahmads erster echter Export): Health Auto
+# Export liefert diese Groessen als VIELE Minuten-Datenpunkte, nicht als
+# fertige Tagessumme -- ein Punkt wie "29,68" fuer step_count war in
+# Wahrheit nur die letzte einzelne Minute, nicht der Tag. Fuer diese
+# summierbaren Groessen wird deshalb ueber alle Punkte des letzten
+# EXPORTIERTEN Tages aufsummiert. Alles andere (Herzfrequenz, Gehgeschwindigkeit
+# etc.) sind Momentaufnahmen, dafuer bleibt der letzte Punkt richtig.
+_CUMULATIVE_HEALTH_METRICS = {
+    "step_count", "flights_climbed", "active_energy", "basal_energy_burned",
+    "walking_running_distance", "distance_walking_running", "sleep_analysis",
+    "water", "apple_exercise_time", "apple_stand_time",
+}
+
 
 def add_health_import(payload: dict):
     os.makedirs(MEMORY_DIR, exist_ok=True)
     with open(HEALTH_LOG_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps({"received_at": time.strftime("%Y-%m-%d %H:%M:%S"), "payload": payload}, ensure_ascii=False) + "\n")
+
+    def value_of(point, fields):
+        for field in fields:
+            if field in point:
+                return point[field]
+        return None
 
     latest = {}
     try:
@@ -881,11 +900,22 @@ def add_health_import(payload: dict):
             points = m.get("data") or []
             if not name or not points:
                 continue
-            last_point = points[-1]
-            for field in _KNOWN_HEALTH_METRIC_FIELDS.get(name, ("value", "qty")):
-                if field in last_point:
-                    latest[name] = {"value": last_point[field], "date": last_point.get("date"), "units": m.get("units")}
-                    break
+            fields = _KNOWN_HEALTH_METRIC_FIELDS.get(name, ("value", "qty"))
+            points_sorted = sorted(points, key=lambda p: p.get("date", ""))
+            last_point = points_sorted[-1]
+            last_value = value_of(last_point, fields)
+            if last_value is None:
+                continue
+
+            if name in _CUMULATIVE_HEALTH_METRICS:
+                last_day = str(last_point.get("date", ""))[:10]
+                day_total = sum(
+                    (value_of(p, fields) or 0) for p in points_sorted
+                    if str(p.get("date", ""))[:10] == last_day
+                )
+                latest[name] = {"value": round(day_total, 2), "date": last_day, "units": m.get("units")}
+            else:
+                latest[name] = {"value": last_value, "date": last_point.get("date"), "units": m.get("units")}
     except (AttributeError, TypeError):
         pass
 
