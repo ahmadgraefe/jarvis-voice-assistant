@@ -405,10 +405,21 @@ def _load_fanplace_snapshot() -> dict:
         return {}
 
 
-def _save_fanplace_snapshot(active_subs: int, all_time_earnings: float):
+def _save_fanplace_snapshot(active_subs: int, all_time_earnings: float, full_data: dict = None):
+    """full_data (2026-08-11, Ahmads Cockpit) haelt zusaetzlich den kompletten
+    Rohabruf (earnings/subscribers Today/Week/Month/ALL-TIME) fest, nicht nur
+    die zwei Felder fuer den Churn-Vergleich oben -- server.py's /api/cockpit
+    liest das direkt aus dieser Datei statt selbst live zu scrapen (Fanplace
+    braucht einen sichtbaren, nicht-headless Browser gegen Cloudflare, das
+    waere bei jedem Seitenaufruf zu langsam/riskant fuer Browser-Kollisionen
+    mit dieser Pass hier)."""
     os.makedirs(os.path.dirname(FANPLACE_SNAPSHOT_PATH), exist_ok=True)
+    payload = {"active_subs": active_subs, "all_time_earnings": all_time_earnings}
+    if full_data:
+        payload["full"] = full_data
+        payload["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     with open(FANPLACE_SNAPSHOT_PATH, "w") as f:
-        json.dump({"active_subs": active_subs, "all_time_earnings": all_time_earnings}, f)
+        json.dump(payload, f)
 
 
 async def fanplace_pass(config: dict):
@@ -430,7 +441,7 @@ async def fanplace_pass(config: dict):
 
     prev = _load_fanplace_snapshot()
     prev_subs = prev.get("active_subs")
-    _save_fanplace_snapshot(active_subs, all_time)
+    _save_fanplace_snapshot(active_subs, all_time, data)
 
     if prev_subs is None:
         return  # first-ever check, nothing to compare against yet

@@ -3263,6 +3263,29 @@ def _goals_for_cockpit() -> list:
     return result
 
 
+def _fanplace_for_cockpit() -> dict:
+    """Liest den von background_brain.py's fanplace_pass zwischengespeicherten
+    Snapshot (memory/fanplace_snapshot.json), statt bei jedem Seitenaufruf
+    selbst live zu scrapen -- Fanplace braucht einen sichtbaren, nicht-
+    headless Browser gegen Cloudflare, das waere hier zu langsam und koennte
+    mit der laufenden Hintergrund-Pass um denselben Browser-Kontext
+    kollidieren. Naechster Pass-Durchlauf ist spaetestens alle 90 Minuten
+    (INSTAGRAM_INTERVAL_SECONDS, background_brain.py), 'updated_at' zeigt
+    Ahmad ehrlich wie frisch der Stand ist."""
+    path = os.path.join(os.path.dirname(__file__), "memory", "fanplace_snapshot.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            snap = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    full = snap.get("full")
+    if not full or not isinstance(full, dict):
+        return {}
+    return {"earnings": full.get("earnings"), "subscribers": full.get("subscribers"), "updated_at": snap.get("updated_at")}
+
+
 @app.get("/cockpit")
 async def serve_cockpit():
     return FileResponse(os.path.join(os.path.dirname(__file__), "frontend", "cockpit.html"))
@@ -3282,8 +3305,15 @@ async def api_cockpit():
         winners = []
         print(f"  Cockpit: Winner-Tracking-Abruf fehlgeschlagen: {e}", flush=True)
 
+    try:
+        slt = await slt_bio_tools.get_daily_snapshot()
+    except Exception as e:
+        slt = None
+        print(f"  Cockpit: slt.bio-Abruf fehlgeschlagen: {e}", flush=True)
+
     goals = _goals_for_cockpit()
     habits = habit_tracker.get_habits_with_status()
+    funnel = {"fanplace": _fanplace_for_cockpit() or None, "slt": slt}
 
     # Ehrlicher, regelbasierter Hinweis statt einer erfundenen/per LLM
     # generierten Einschaetzung -- keine zusaetzlichen Kosten/Latenz bei
@@ -3302,6 +3332,7 @@ async def api_cockpit():
         "goals": goals,
         "instagram": _latest_instagram_snapshots(),
         "winners": winners,
+        "funnel": funnel,
         "habits": habits,
         "meals": memory.get_recent_meals(days=1),
         "health": memory.get_latest_health(),

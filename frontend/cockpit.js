@@ -88,6 +88,38 @@ function renderBusiness(data) {
     : emptyState("trophy", "Keine Winner-Tracking-Einträge geladen (oder das Sheet war gerade nicht erreichbar).");
 }
 
+function renderFunnel(data) {
+  const f = data.funnel || {};
+  const fp = f.fanplace;
+  const slt = f.slt;
+  const sub = document.getElementById("funnelSub");
+  sub.textContent = fp && fp.updated_at ? `Fanplace-Stand ${fp.updated_at} · slt.bio ${slt ? slt.day : "-"}` : "Von Klick zu Abo";
+
+  const kpis = [];
+  if (slt) {
+    kpis.push(kpiCard("mouse-pointer-click", "Link-Klicks heute", fmt(slt.totals.link_clicks), "", `${fmt(slt.totals.views)} Views insgesamt`, "flat", "eye"));
+  } else {
+    kpis.push(kpiCard("mouse-pointer-click", "Link-Klicks", "–", "", "keine Daten", "flat", "minus"));
+  }
+  if (fp && fp.subscribers) {
+    kpis.push(kpiCard("user-plus", "Neue Abos (Monat)", fmt(parseInt(fp.subscribers["This month"], 10)), "", `${fmt(parseInt(fp.subscribers.ACTIVE, 10))} aktiv insgesamt`, "up", "arrow-up-right"));
+    kpis.push(kpiCard("wallet", "Einnahmen heute", fp.earnings.Today, "", `${fp.earnings["This month"] || ""} diesen Monat`, "flat", "calendar"));
+    kpis.push(kpiCard("trending-up", "Einnahmen gesamt", fp.earnings["ALL-TIME"], "", null));
+  } else {
+    kpis.push(kpiCard("user-plus", "Abos", "–", "", "noch kein Snapshot (laeuft alle 90 Min. im Hintergrund)", "flat", "clock"));
+  }
+  document.getElementById("funnelKpis").innerHTML = kpis.join("");
+
+  const linksEl = document.getElementById("funnelLinks");
+  if (slt && slt.per_page && Object.keys(slt.per_page).length) {
+    linksEl.innerHTML = Object.entries(slt.per_page)
+      .sort((a, b) => b[1].link_clicks - a[1].link_clicks)
+      .map(([name, p]) => rowHtml("var(--color-info)", name, `${fmt(p.views)} Views${p.blocked ? ` · ${fmt(p.blocked)} geblockt` : ""}`, fmt(p.link_clicks), "Klicks")).join("");
+  } else {
+    linksEl.innerHTML = emptyState("filter", "Keine slt.bio-Daten fuer heute geladen.");
+  }
+}
+
 function renderFinance(data) {
   const f = data.finance;
   const sub = document.getElementById("financeSub");
@@ -175,6 +207,7 @@ async function loadCockpit() {
 
     renderOverview(data);
     renderBusiness(data);
+    renderFunnel(data);
     renderFinance(data);
     renderGoals(data);
     renderHabits(data);
