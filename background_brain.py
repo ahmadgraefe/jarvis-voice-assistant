@@ -1051,6 +1051,13 @@ async def self_improve_pass(config: dict):
         "Aenderung. Ein Workflow der nur im Code existiert, aber nirgends in Jarvis' eigenem "
         "Wissen dokumentiert ist, fuehrt sonst dazu dass Jarvis im Gespraech weiter den alten "
         "Prozess erklaert.\n\n"
+        "WICHTIG (2026-08-11, nach einem echten Vorfall): fuehre selbst KEINE Git-Befehle aus "
+        "(kein git add/commit/push) -- das Commiten+Pushen uebernimmt automatisch der Prozess, "
+        "der dich aufgerufen hat, direkt NACH dieser Aufgabe. Ein eigener Commit aendert den "
+        "Besitzer von .git auf diesen eingeschraenkten User, wodurch der aufrufende Prozess "
+        "(laeuft als root) 'git status' danach nicht mehr ausfuehren kann ('detected dubious "
+        "ownership') -- genau das ist schon passiert und hat einen echten, korrekten Fix vorerst "
+        "unsichtbar gemacht. Bearbeite nur Dateien, committe nichts selbst.\n\n"
         "Fasse am Ende in 2-3 Saetzen auf Deutsch zusammen was du getan oder herausgefunden hast."
     )
     result, commit_hash = await claude_code_tool.run_claude_code_with_commit(task)
@@ -1312,6 +1319,12 @@ async def skill_growth_pass(config: dict):
         "dokumentierten Geschaeftsprozess/Workflow beruehrt oder ersetzt, pruefe ob "
         "claude_app_status.md dazu etwas Veraltetes sagt, und aktualisiere es in DERSELBEN "
         "Aenderung.\n\n"
+        "WICHTIG (2026-08-11, nach einem echten Vorfall): fuehre selbst KEINE Git-Befehle aus "
+        "(kein git add/commit/push) -- das Commiten+Pushen uebernimmt automatisch der Prozess, "
+        "der dich aufgerufen hat, direkt NACH dieser Aufgabe. Ein eigener Commit aendert den "
+        "Besitzer von .git auf diesen eingeschraenkten User, wodurch der aufrufende Prozess "
+        "(laeuft als root) 'git status' danach nicht mehr ausfuehren kann ('detected dubious "
+        "ownership'). Bearbeite nur Dateien, committe nichts selbst.\n\n"
         "Pruefe am Ende mit 'python3 -m py_compile server.py' dass alles syntaktisch sauber ist. "
         "Fasse in 2-3 Saetzen auf Deutsch zusammen was du gebaut oder herausgefunden hast."
     )
