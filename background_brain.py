@@ -2415,7 +2415,7 @@ async def morning_briefing_pass(config: dict):
 
     parts = ["Guten Morgen! Kurzer Ueberblick zum Start:"]
     if open_qs:
-        parts.append(f"{len(open_qs)} offene Frage(n) warten, allen voran: {open_qs[0]['text']}")
+        parts.append(f"{len(open_qs)} offene Frage(n) warten, allen voran: {open_qs[0]['question']}")
     else:
         parts.append("Keine offenen Fragen gerade.")
     if self_improve_note:
