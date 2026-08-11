@@ -111,6 +111,7 @@ import goal_tracker
 import push_notifications
 import habit_tracker
 import finance_tracker
+import flight_prices
 
 LUNA_VALE_STATUS_PATH = os.path.join(os.path.dirname(__file__), "claude_app_status.md")
 
@@ -977,6 +978,55 @@ async def _tool_browser_extract(args: dict) -> str:
     for i, item in enumerate(items, 1):
         fields = " | ".join(f"{k}: {v}" for k, v in item.items())
         lines.append(f"{i}. {fields}")
+    return "\n".join(lines)
+
+
+async def _tool_flight_search(args: dict) -> str:
+    """Live-Flugpreise ueber die offizielle Amadeus-API statt Skyscanner/Kayak
+    zu scrapen — beide blocken Bots per CAPTCHA, der Playwright-Weg lieferte
+    dort nie echte Preise (Ahmads Anfrage, 2026-08-11). Rein lesend, es wird
+    nichts gebucht, deshalb kein Bestaetigungs-Gate."""
+    result = await flight_prices.search_flights(
+        origin=args.get("origin", ""),
+        destination=args.get("destination", ""),
+        departure_date=args.get("departure_date", ""),
+        return_date=args.get("return_date", ""),
+        adults=args.get("adults", 1),
+        travel_class=args.get("travel_class", ""),
+        nonstop=bool(args.get("nonstop", False)),
+        max_results=args.get("max_results", 5),
+        currency=args.get("currency", "EUR"),
+    )
+    if "error" in result:
+        # Bewusst als ERROR durchreichen: lieber ehrlich "geht gerade nicht"
+        # als eine plausibel klingende, erfundene Preisangabe.
+        return f"ERROR: Flugpreise nicht abrufbar — {result['error']}"
+
+    trip = f"{result['from']} → {result['to']} am {result['departure_date']}"
+    if result["return_date"]:
+        trip += f", zurueck am {result['return_date']}"
+    if result["adults"] > 1:
+        trip += f", {result['adults']} Reisende"
+
+    lines = [f"Live-Angebote ({trip}), guenstigste zuerst:"]
+    for i, offer in enumerate(result["offers"], 1):
+        price = f"{offer['price']:.2f} {offer['currency']}"
+        seats = f" | nur noch {offer['seats_left']} Plaetze buchbar" if offer.get("seats_left") else ""
+        lines.append(f"{i}. {price} — {offer['outbound']}{seats}")
+        if offer["inbound"]:
+            lines.append(f"   Rueckflug: {offer['inbound']}")
+    cheapest, priciest = result["offers"][0], result["offers"][-1]
+    if len(result["offers"]) > 1 and priciest["price"] > cheapest["price"]:
+        lines.append(
+            f"Spanne: {cheapest['price']:.2f}–{priciest['price']:.2f} {cheapest['currency']} "
+            f"({priciest['price'] - cheapest['price']:.2f} Unterschied)."
+        )
+    lines.append(f"Buchen (Google Flights, gleiche Strecke): {result['link']}")
+    if result["environment"] == "test":
+        lines.append(
+            "Hinweis: Amadeus-Testumgebung — echte API-Daten, aber ein reduzierter "
+            "Datensatz. Fuer verbindliche Preise 'amadeus_environment': 'production' setzen."
+        )
     return "\n".join(lines)
 
 
@@ -1886,6 +1936,47 @@ TOOL_REGISTRY: dict = {
         speak_result=True,
         slow=True,
     ),
+    "flight_search": ToolSpec(
+        schema={
+            "name": "flight_search",
+            "description": (
+                "Sucht ECHTE, aktuelle Flugpreise und vergleicht sie (guenstigste zuerst, mit "
+                "Airline, Abflug-/Ankunftszeit, Dauer, Stopps). Nutze das IMMER bei Fragen wie "
+                "'was kostet ein Flug nach X', 'finde mir den guenstigsten Flug am ...', "
+                "'vergleiche Flugpreise' — NICHT search/browse/browser_extract auf Skyscanner "
+                "oder Kayak, die blocken Bots per CAPTCHA und liefern keine echten Preise. "
+                "Daten kommen live aus der offiziellen Amadeus-Flight-Offers-API (dieselbe "
+                "GDS-Quelle wie bei Vergleichsportalen). Datumsangaben im Format JJJJ-MM-TT; "
+                "Orte als Stadtname ('Berlin') oder IATA-Code ('BER'). Rein lesend — es wird "
+                "nichts gebucht und nichts bezahlt, am Ende kommt nur ein Buchungslink. "
+                "Wenn keine Preise abrufbar sind, kommt ein ERROR zurueck — dann NIEMALS eine "
+                "Zahl schaetzen oder aus dem Gedaechtnis nennen, sondern ehrlich sagen, dass "
+                "es gerade nicht geht."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "origin": {"type": "string", "description": "Startort, z.B. 'Berlin' oder 'BER'."},
+                    "destination": {"type": "string", "description": "Zielort, z.B. 'Istanbul' oder 'IST'."},
+                    "departure_date": {"type": "string", "description": "Hinflugdatum, JJJJ-MM-TT."},
+                    "return_date": {"type": "string", "description": "Rueckflugdatum JJJJ-MM-TT, weglassen bei One-Way."},
+                    "adults": {"type": "integer", "description": "Anzahl Erwachsene, Default 1."},
+                    "travel_class": {
+                        "type": "string",
+                        "enum": ["ECONOMY", "PREMIUM_ECONOMY", "BUSINESS", "FIRST"],
+                        "description": "Optional, sonst alle Klassen.",
+                    },
+                    "nonstop": {"type": "boolean", "description": "Nur Direktfluege, Default false."},
+                    "max_results": {"type": "integer", "description": "Wie viele Angebote, 1-10, Default 5."},
+                    "currency": {"type": "string", "description": "Waehrung, Default EUR."},
+                },
+                "required": ["origin", "destination", "departure_date"],
+            },
+        },
+        handler=_tool_flight_search,
+        speak_result=True,
+        slow=True,
+    ),
     "server_status": ToolSpec(
         schema={
             "name": "server_status",
@@ -2675,6 +2766,7 @@ SLOW_TOOL_FILLERS = {
     "instagram_trend": "Ich schaue kurz bei Instagram nach.",
     "research": "Ich recherchiere das kurz.",
     "browser_extract": "Ich werte die Seite strukturiert aus.",
+    "flight_search": "Ich hole die aktuellen Flugpreise, einen Moment.",
     "video_analysis": "Ich schaue mir die letzten Videos an.",
     "gmail_check": "Ich schaue kurz ins Postfach.",
     "whatsapp_check": "Ich schaue kurz bei WhatsApp nach.",

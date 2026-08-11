@@ -9,5 +9,8 @@
   "spotify_track": "spotify:track:YOUR_TRACK_ID",
   "browser_url": "https://your-website.com",
   "obsidian_inbox_path": "C:\\Users\\YOUR_USER\\path\\to\\obsidian\\inbox",
+  "amadeus_api_key": "YOUR_AMADEUS_API_KEY",
+  "amadeus_api_secret": "YOUR_AMADEUS_API_SECRET",
+  "amadeus_environment": "test",
   "apps": ["obsidian://open"]
 }
