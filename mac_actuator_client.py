@@ -19,6 +19,23 @@ _TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
 _last_error = ""
 
 
+def _describe_error(e: Exception) -> str:
+    """Fehlertext fuer die Aufrufer. Zwei Faelle bewusst auseinandergehalten,
+    weil sie voellig verschiedene Ursachen haben und "nicht erreichbar" fuer
+    beide in die Irre fuehrt (echter Vorfall 2026-08-11: ein HTTP 500 vom Mac
+    landete als "Mac-Actuator nicht erreichbar" im Log, obwohl der Mac lief
+    und antwortete — der Fehler passierte IN der Mac-Funktion):
+    - HTTP-Statusfehler: Verbindung stand, der Mac selbst hat den Fehler.
+    - alles andere: echt nicht erreichbar (Mac aus/im Ruhezustand, Tailscale
+      unten). Der Klassenname muss mit rein, weil httpx' Verbindungsfehler
+      oft eine LEERE Nachricht haben ("nicht erreichbar ()" sagte nichts)."""
+    if isinstance(e, httpx.HTTPStatusError):
+        return (f"Mac-Actuator antwortete mit HTTP {e.response.status_code} auf "
+                f"{e.request.url.path} — Fehler auf dem Mac, nicht bei der Verbindung")
+    detail = str(e).strip()
+    return f"Mac-Actuator nicht erreichbar ({type(e).__name__}{': ' + detail if detail else ''})"
+
+
 async def _post(path: str, json_body: Optional[dict] = None) -> dict:
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         r = await client.post(f"{MAC_ACTUATOR_URL}{path}", json=json_body or {})
@@ -33,7 +50,7 @@ async def open_app(app_name: str) -> str:
         data = await _post("/app/open", {"app_name": app_name})
         return data["result"]
     except Exception as e:
-        return f"ERROR: Mac-Actuator nicht erreichbar ({e})."
+        return f"ERROR: {_describe_error(e)}."
 
 
 async def send_whatsapp(recipient: str, message: str) -> str:
@@ -41,7 +58,7 @@ async def send_whatsapp(recipient: str, message: str) -> str:
         data = await _post("/whatsapp/send", {"recipient": recipient, "message": message})
         return data["result"]
     except Exception as e:
-        return f"ERROR: Mac-Actuator nicht erreichbar ({e})."
+        return f"ERROR: {_describe_error(e)}."
 
 
 async def resolve_contact_phone(name_or_phone: str):
@@ -51,7 +68,7 @@ async def resolve_contact_phone(name_or_phone: str):
         _last_error = data.get("error") or ""
         return data.get("phone")
     except Exception as e:
-        _last_error = f"Mac-Actuator nicht erreichbar ({e})"
+        _last_error = _describe_error(e)
         return None
 
 
@@ -66,7 +83,7 @@ async def check_new_messages(anthropic_client=None) -> str:
         data = await _post("/whatsapp/check_new")
         return data["result"]
     except Exception as e:
-        return f"ERROR: Mac-Actuator nicht erreichbar ({e})."
+        return f"ERROR: {_describe_error(e)}."
 
 
 async def open_chat_and_screenshot(phone: str) -> bytes:
@@ -85,7 +102,7 @@ async def summarize_chat(anthropic_client, png_bytes: bytes, contact_label: str)
         })
         return data["result"]
     except Exception as e:
-        return f"ERROR: Mac-Actuator nicht erreichbar ({e})."
+        return f"ERROR: {_describe_error(e)}."
 
 
 async def capture_self_chat_history(own_phone: str, frames: int = 3, scroll_amount: int = 12) -> list:
@@ -103,7 +120,7 @@ async def click_on(description: str, anthropic_client, action: str = "click") ->
         data = await _post("/screen/click", {"description": description, "action": action})
         return data["result"]
     except Exception as e:
-        return f"ERROR: Mac-Actuator nicht erreichbar ({e})."
+        return f"ERROR: {_describe_error(e)}."
 
 
 def type_text(text: str) -> str:
@@ -115,7 +132,7 @@ def type_text(text: str) -> str:
             r.raise_for_status()
             return r.json()["result"]
     except Exception as e:
-        return f"ERROR: Mac-Actuator nicht erreichbar ({e})."
+        return f"ERROR: {_describe_error(e)}."
 
 
 # --- claude_code_context.py / claude_code_tool.py Ersatz ---
@@ -129,7 +146,7 @@ def get_recent_context(question: str) -> str:
             r.raise_for_status()
             return r.json()["result"]
     except Exception as e:
-        return f"ERROR: Mac-Actuator nicht erreichbar ({e})."
+        return f"ERROR: {_describe_error(e)}."
 
 
 async def describe_screen(anthropic_client=None) -> str:
@@ -137,7 +154,7 @@ async def describe_screen(anthropic_client=None) -> str:
         data = await _post("/screen/describe")
         return data["result"]
     except Exception as e:
-        return f"ERROR: Mac-Actuator nicht erreichbar ({e})."
+        return f"ERROR: {_describe_error(e)}."
 
 
 async def describe_screen_for_awareness(anthropic_client=None, excluded_apps=None) -> dict:
@@ -147,7 +164,7 @@ async def describe_screen_for_awareness(anthropic_client=None, excluded_apps=Non
     try:
         return await _post("/screen/awareness")
     except Exception as e:
-        return {"skipped": True, "reason": f"Mac-Actuator nicht erreichbar ({e})"}
+        return {"skipped": True, "reason": _describe_error(e)}
 
 
 async def run_claude_code(task: str, timeout: int = 600) -> str:
@@ -162,4 +179,4 @@ async def run_claude_code(task: str, timeout: int = 600) -> str:
             r.raise_for_status()
             return r.json()["result"]
     except Exception as e:
-        return f"ERROR: Mac-Actuator nicht erreichbar ({e})."
+        return f"ERROR: {_describe_error(e)}."

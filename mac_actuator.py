@@ -172,7 +172,17 @@ async def screen_awareness():
     # lokalen config.json (Ahmad pflegt sie hier direkt, keine Umwege ueber
     # den Server noetig).
     excluded_apps = config.get("screen_awareness_excluded_apps", [])
-    return await screen_capture.describe_screen_for_awareness(ai, excluded_apps)
+    try:
+        return await screen_capture.describe_screen_for_awareness(ai, excluded_apps)
+    except Exception as e:
+        # Ohne dieses except wird JEDER lokale Mac-Fehler (screencapture-Timeout
+        # ueber Terminal.app, kurzzeitiger Vision-API-Fehler) zu einem nackten
+        # HTTP 500, das der Server dann als "Mac-Actuator nicht erreichbar"
+        # loggt — die eigentliche Ursache war damit nirgends sichtbar
+        # (echter Vorfall 2026-08-11 15:41). Stattdessen die gleiche
+        # skipped/reason-Antwort wie beim Ausschluss oben, die der Aufrufer
+        # ohnehin schon versteht: der Grund kommt so im Server-Log an.
+        return {"skipped": True, "reason": f"Fehler auf dem Mac: {type(e).__name__}: {e}"}
 
 
 @app.get("/health")
