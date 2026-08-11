@@ -878,7 +878,12 @@ async def _tool_screen_history(args: dict) -> str:
 
 async def _tool_open_url(args: dict) -> str:
     url = args["url"]
-    await browser_tools.open_url(url)
+    result = await browser_tools.open_url(url)
+    # War bisher immer "Geoeffnet: ..." egal was wirklich passiert ist --
+    # ueber den Mac-Actuator kann das jetzt echt fehlschlagen (Mac aus,
+    # Tailscale unten), das muss ehrlich ankommen statt Erfolg vorzutaeuschen.
+    if isinstance(result, dict) and not result.get("success", True):
+        return f"ERROR: Konnte {url} nicht auf dem Mac oeffnen: {result.get('error', 'unbekannter Fehler')}"
     return f"Geoeffnet: {url}"
 
 
@@ -1639,7 +1644,7 @@ TOOL_REGISTRY: dict = {
     "open_url": ToolSpec(
         schema={
             "name": "open_url",
-            "description": "Oeffnet eine URL in einem Browser-Prozess AUF DEM SERVER (Hetzner, headless via Xvfb) — NICHT sichtbar fuer Ahmad, der sich von einem eigenen Geraet aus verbindet. Zeigt Sir NICHTS direkt, ist kein Ersatz fuers Beschreiben/Vorlesen von Inhalten. Praktisch kaum noch ein sinnvoller Anwendungsfall seit der Server-Migration (2026-08-09/10) — fuer Inhalte die Jarvis lesen/auswerten soll stattdessen browser_extract nutzen.",
+            "description": "Oeffnet eine URL im echten, sichtbaren Standardbrowser auf Ahmads Mac (laeuft ueber den Mac-Actuator, seit 2026-08-11 wieder echt funktionsfaehig). Nutzen um Sir direkt etwas zu zeigen statt nur zu beschreiben, z.B. 'oeffne Google fuer mich' oder eine bestimmte Webseite. Fuer Inhalte die JARVIS selbst lesen/auswerten soll (nicht Ahmad sehen), stattdessen browser_extract nutzen (laeuft headless auf dem Server, schneller).",
             "input_schema": {
                 "type": "object",
                 "properties": {"url": {"type": "string", "description": "Die zu oeffnende URL."}},

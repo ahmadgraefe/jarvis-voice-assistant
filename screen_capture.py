@@ -27,6 +27,77 @@ def capture_screen() -> bytes:
     return buf.getvalue()
 
 
+async def _run_terminal_screencapture(timeout: float, reuse_window: bool) -> bytes:
+    fd, path = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    os.remove(path)  # screencapture legt die Datei frisch an, sonst nicht von "noch nicht fertig" unterscheidbar
+
+    if reuse_window:
+        # EIN wiederverwendetes, per Custom-Title identifizierbares Terminal-
+        # Fenster statt bei jeder Aufnahme ein neues zu oeffnen (gleiches
+        # "Fenster wiederverwenden statt stapeln"-Prinzip wie launch-session.sh
+        # schon bei Chrome nutzt). Ausprobiert und verworfen: das Fenster nach
+        # jeder Aufnahme per 'close' zu schliessen — Terminal meldet Erfolg,
+        # das Fenster bleibt aber live bestaetigt trotzdem offen.
+        script = f'''
+        tell application "Terminal"
+            set foundWindow to missing value
+            repeat with w in windows
+                try
+                    if (custom title of tab 1 of w) is "jarvis-capture" then
+                        set foundWindow to w
+                        exit repeat
+                    end if
+                end try
+            end repeat
+            if foundWindow is missing value then
+                set jarvisTab to do script "screencapture -x -T 0 {path}"
+                set custom title of jarvisTab to "jarvis-capture"
+            else
+                set jarvisTab to do script "screencapture -x -T 0 {path}" in foundWindow
+            end if
+            repeat while busy of jarvisTab
+                delay 0.2
+            end repeat
+        end tell
+        '''
+    else:
+        # Fallback-Zweig (siehe Aufrufer unten): kein Reuse-Lookup, immer ein
+        # brandneues Fenster ohne Custom-Title. Faengt den Fall auf, dass das
+        # sonst wiederverwendete "jarvis-capture"-Fenster in einen kaputten
+        # Zustand geraten ist (z.B. von Ahmad manuell geschlossen, Terminal
+        # neu gestartet) -- ein 'do script in foundWindow' auf eine ungueltige
+        # Fensterreferenz haengt sonst bis zum Timeout, ohne je etwas zu tun.
+        script = f'''
+        tell application "Terminal"
+            set jarvisTab to do script "screencapture -x -T 0 {path}"
+            repeat while busy of jarvisTab
+                delay 0.2
+            end repeat
+        end tell
+        '''
+
+    proc = await asyncio.create_subprocess_exec(
+        "osascript", "-e", script,
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    if not (os.path.exists(path) and os.path.getsize(path) > 0):
+        raise RuntimeError("Screenshot ueber Terminal.app kam nicht rechtzeitig an")
+
+    with open(path, "rb") as f:
+        data = f.read()
+    os.remove(path)
+    return data
+
+
 async def _capture_screen_via_terminal(timeout: float = 10.0) -> bytes:
     """macOS' 'Bildschirmaufnahme'-Berechtigung ist strenger als Bedienungs-
     hilfen/Automation: ein von launchd gestarteter Hintergrundprozess (wie
@@ -38,57 +109,17 @@ async def _capture_screen_via_terminal(timeout: float = 10.0) -> bytes:
     ueber EINEN einmaligen, kurzen Terminal-Befehl aus (kein Dauerprozess,
     keine KeepAlive-Neustart-Schleife wie beim frueheren com.jarvis.brain-
     Problem — nur dieser eine schnelle Screenshot, dann ist Terminal fertig).
-    """
-    fd, path = tempfile.mkstemp(suffix=".png")
-    os.close(fd)
-    os.remove(path)  # screencapture legt die Datei frisch an, sonst nicht von "noch nicht fertig" unterscheidbar
-    # EIN wiederverwendetes, per Custom-Title identifizierbares Terminal-
-    # Fenster statt bei jeder Aufnahme ein neues zu oeffnen (gleiches "Fenster
-    # wiederverwenden statt stapeln"-Prinzip wie launch-session.sh schon bei
-    # Chrome nutzt). Ausprobiert und verworfen: das Fenster nach jeder
-    # Aufnahme per 'close' zu schliessen — Terminal meldet Erfolg, das
-    # Fenster bleibt aber live bestaetigt trotzdem offen (vermutlich Ahmads
-    # "bei keinem offenen Fenster ein neues oeffnen"-Einstellung ersetzt es
-    # sofort 1:1). Wiederverwenden umgeht das Problem komplett, kein
-    # Dauerprozess/KeepAlive wie beim frueheren com.jarvis.brain-Problem.
-    script = f'''
-    tell application "Terminal"
-        set foundWindow to missing value
-        repeat with w in windows
-            try
-                if (custom title of tab 1 of w) is "jarvis-capture" then
-                    set foundWindow to w
-                    exit repeat
-                end if
-            end try
-        end repeat
-        if foundWindow is missing value then
-            set jarvisTab to do script "screencapture -x -T 0 {path}"
-            set custom title of jarvisTab to "jarvis-capture"
-        else
-            set jarvisTab to do script "screencapture -x -T 0 {path}" in foundWindow
-        end if
-        repeat while busy of jarvisTab
-            delay 0.2
-        end repeat
-    end tell
-    '''
-    proc = await asyncio.create_subprocess_exec(
-        "osascript", "-e", script,
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-    )
+
+    Live beobachtet (2026-08-11, Ahmad meldete wiederholt "kann den
+    Bildschirm nicht sehen"): das wiederverwendete Fenster kann in einen
+    haengenden Zustand geraten und den Timeout reissen lassen. EIN
+    automatischer Fallback-Versuch mit einem komplett neuen Fenster faengt
+    das auf, statt dass Jarvis dauerhaft blind bleibt bis jemand manuell
+    eingreift."""
     try:
-        await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        pass  # Datei-Check unten entscheidet, nicht der osascript-Rueckgabewert
-
-    if not (os.path.exists(path) and os.path.getsize(path) > 0):
-        raise RuntimeError("Screenshot ueber Terminal.app kam nicht rechtzeitig an")
-
-    with open(path, "rb") as f:
-        data = f.read()
-    os.remove(path)
-    return data
+        return await _run_terminal_screencapture(timeout, reuse_window=True)
+    except RuntimeError:
+        return await _run_terminal_screencapture(timeout, reuse_window=False)
 
 
 async def _get_frontmost_app_name() -> str:

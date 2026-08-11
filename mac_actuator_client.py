@@ -53,6 +53,16 @@ async def open_app(app_name: str) -> str:
         return f"ERROR: {_describe_error(e)}."
 
 
+# --- browser_tools.py Ersatz ---
+
+async def open_url(url: str):
+    try:
+        data = await _post("/browser/open_url", {"url": url})
+        return data["result"]
+    except Exception as e:
+        return {"success": False, "url": url, "error": _describe_error(e)}
+
+
 async def send_whatsapp(recipient: str, message: str) -> str:
     try:
         data = await _post("/whatsapp/send", {"recipient": recipient, "message": message})

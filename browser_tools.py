@@ -4,6 +4,7 @@ Web search via DuckDuckGo Lite, page visits via Playwright, URL opening.
 """
 
 import json
+import os
 import re
 import webbrowser
 import subprocess
@@ -420,3 +421,15 @@ async def close():
         await _browser.close()
         _browser = None
         _context = None
+
+
+# Server-Migration (Hetzner): auf dem Server (JARVIS_ROLE=server) wird NUR
+# open_url durch einen HTTP-Aufruf an mac_actuator.py ersetzt -- webbrowser.
+# open() auf dem Server selbst wuerde etwas auf dem unsichtbaren Xvfb-Display
+# oeffnen, zeigt Ahmad also nie irgendetwas (live entdeckt 2026-08-11). Die
+# uebrigen Funktionen in dieser Datei (search_and_read, fetch_news, etc.)
+# bleiben bewusst server-seitig, das ist legitimes, unsichtbares Scraping,
+# kein "Ahmad soll das sehen"-Anwendungsfall. Gleiches Muster wie am Ende
+# von app_control.py.
+if os.environ.get("JARVIS_ROLE") == "server":
+    from mac_actuator_client import open_url  # noqa: E402,F811

@@ -26,6 +26,7 @@ import screen_control
 import claude_code_context
 import claude_code_tool
 import screen_capture
+import browser_tools
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 with open(CONFIG_PATH) as f:
@@ -59,6 +60,22 @@ class AppOpenReq(BaseModel):
 @app.post("/app/open")
 async def app_open(req: AppOpenReq):
     return {"result": await app_control.open_app(req.app_name)}
+
+
+class OpenUrlReq(BaseModel):
+    url: str
+
+
+@app.post("/browser/open_url")
+async def browser_open_url(req: OpenUrlReq):
+    # Live entdeckt (2026-08-11, Ahmad: "oeffne Google fuer mich, kein Tab
+    # wurde geoeffnet"): der native open_url-Handler in server.py rief bisher
+    # NUR browser_tools.open_url() direkt auf dem Hetzner-Server auf --
+    # webbrowser.open() dort oeffnet etwas auf dem unsichtbaren Xvfb-Display,
+    # zeigt Ahmad also nie irgendetwas. Dieser Endpunkt laeuft echt auf dem
+    # Mac, oeffnet die URL im echten, sichtbaren Standardbrowser.
+    result = await browser_tools.open_url(req.url)
+    return {"result": result}
 
 
 class WhatsappSendReq(BaseModel):
