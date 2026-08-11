@@ -265,28 +265,38 @@ def _parse_inbox_percent(raw):
     return val / 100 if val > 1 else val
 
 
-async def _alert(config: dict, text: str):
-    """Immediate WhatsApp self-alert. Also queues the same text as a 'live
-    event' (memory.add_live_event) so server.py can speak it into an
-    ALREADY-open conversation if one happens to be running — see
-    memory.py's live_events section. Best-effort only: must never throw and
-    must never block/replace the WhatsApp send, which stays the one channel
-    already proven reliable regardless of whether anyone's mid-conversation."""
-    try:
-        memory.add_live_event(text)
-    except Exception as e:
-        _log(f"live_event Warteschlange fehlgeschlagen (ignoriert): {e}")
+async def _alert(config: dict, text: str, speak_live: bool = True):
+    """Immediate WhatsApp self-alert. Standardmaessig wird der Text zusaetzlich
+    als 'live event' gequeued (memory.add_live_event), sodass server.py ihn
+    SOFORT in ein GERADE ERST verbundenes Gespraech hineinspricht, auch ohne
+    dass Ahmad irgendwas gesagt hat — siehe memory.py's live_events section.
 
-    # Roadmap Punkt 3 — Event-Bus statt blindem Warten auf den 5-Sekunden-
-    # Datei-Poll von server.py (_live_events_poll_loop dort): direkter Aufruf,
-    # senkt die Zustellzeit im Normalfall auf nahezu sofort. Rein best effort
-    # und mit kurzem Timeout — der Datei-Weg oben bleibt der Fallback, falls
-    # server.py gerade nicht erreichbar ist (z.B. eigener Neustart).
-    try:
-        async with httpx.AsyncClient(timeout=3) as client:
-            await client.post("http://127.0.0.1:8340/internal/push_event", json={"text": text})
-    except Exception:
-        pass
+    speak_live=False (Ahmad, 2026-08-11, echter Vorfall): fuer Hinweise ohne
+    echte Dringlichkeit (z.B. routine Gmail-Triage) wirkte dieses sofortige,
+    kontextlose Vorlesen "sinnlos" ("er liest mir das einfach so vor, wenn
+    ich ihn oeffne"), obwohl WhatsApp/Push schon zuverlaessig zugestellt
+    haben. Push-Benachrichtigung und WhatsApp bleiben in JEDEM Fall bestehen,
+    nur der sofortige Sprach-Interrupt beim naechsten Verbinden entfaellt.
+
+    Best-effort only: darf nie werfen und nie den WhatsApp-Versand blockieren/
+    ersetzen, der bleibt der eine Kanal der zuverlaessig ankommt, egal ob
+    gerade ein Gespraech laeuft."""
+    if speak_live:
+        try:
+            memory.add_live_event(text)
+        except Exception as e:
+            _log(f"live_event Warteschlange fehlgeschlagen (ignoriert): {e}")
+
+        # Roadmap Punkt 3 — Event-Bus statt blindem Warten auf den 5-Sekunden-
+        # Datei-Poll von server.py (_live_events_poll_loop dort): direkter Aufruf,
+        # senkt die Zustellzeit im Normalfall auf nahezu sofort. Rein best effort
+        # und mit kurzem Timeout — der Datei-Weg oben bleibt der Fallback, falls
+        # server.py gerade nicht erreichbar ist (z.B. eigener Neustart).
+        try:
+            async with httpx.AsyncClient(timeout=3) as client:
+                await client.post("http://127.0.0.1:8340/internal/push_event", json={"text": text})
+        except Exception:
+            pass
 
     try:
         push_notifications.send_push_to_all("Jarvis", text)
@@ -1582,7 +1592,11 @@ async def gmail_reply_pass(config: dict):
     client = anthropic.AsyncAnthropic(api_key=config["anthropic_api_key"])
 
     async def _notify_ahmad(text: str):
-        await _alert(config, text)
+        # speak_live=False (Ahmad, 2026-08-11): routine E-Mail-Hinweise sind
+        # nicht so dringend wie z.B. ein Follower-Einbruch -- WhatsApp/Push
+        # kommen weiterhin sofort an, nur der Sprach-Interrupt beim naechsten
+        # Verbinden entfaellt (wirkte kontextlos/"sinnlos").
+        await _alert(config, text, speak_live=False)
 
     trust_level = config.get("gmail_trust_level", "conservative")
 
