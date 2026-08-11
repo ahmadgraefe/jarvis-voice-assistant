@@ -2515,7 +2515,17 @@ async def _run_pass_safely(label: str, config: dict, coro, timeout: int = PASS_T
     raised Exception, die Coroutine wird einfach nie fertig), den das
     urspruengliche try/except strukturell nicht sehen konnte. Gibt den
     Rueckgabewert des Passes zurueck (fuer Passes wie video_analysis_pass,
-    die einen Zustand zurueckreichen), oder None bei Fehler/Timeout."""
+    die einen Zustand zurueckreichen), oder None bei Fehler/Timeout.
+
+    Schickt zusaetzlich NACH JEDEM Pass einen systemd-Watchdog-Heartbeat
+    (2026-08-11, echter Vorfall): main() schickte den Heartbeat bisher nur
+    EINMAL pro komplettem Tick, ganz am Ende. self_improve_pass/
+    skill_growth_pass duerfen aber bis zu 650s dauern (timeout=650), laenger
+    als WatchdogSec (300s) -- der systemd-Watchdog hat deswegen wiederholt
+    den KOMPLETTEN gesunden Prozess (samt laufendem Claude-Code-Unterprozess,
+    mitten in einer Datei-Aenderung) mit SIGABRT gekillt, obwohl gar kein
+    echter Haenger vorlag. Jetzt hier statt nur am Tick-Ende, damit ein
+    einzelner langsamer Pass den naechsten nicht verpasst."""
     try:
         return await asyncio.wait_for(coro, timeout=timeout)
     except asyncio.TimeoutError:
@@ -2533,6 +2543,8 @@ async def _run_pass_safely(label: str, config: dict, coro, timeout: int = PASS_T
         await _alert(config, f"⚠️ Jarvis: Hintergrund-Aufgabe '{label}' hat nicht reagiert und wurde abgebrochen.")
     except Exception as e:
         _log(f"FEHLER bei {label}: {_exc(e)}")
+    finally:
+        _sd_notify("WATCHDOG=1")
     return None
 
 
