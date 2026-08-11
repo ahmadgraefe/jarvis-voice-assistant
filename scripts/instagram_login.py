@@ -42,10 +42,24 @@ async def main():
         print("\nBitte im geoeffneten Fenster ganz normal bei Instagram einloggen (inkl. 2FA falls noetig).")
         input("Wenn du eingeloggt bist und dein Feed/Profil siehst: hier Enter druecken...")
 
-        await context.storage_state(path=SESSION_PATH)
-        print(f"\nGespeichert: {SESSION_PATH}")
-        print("Jetzt auf den Server kopieren:")
-        print(f"  scp -i ~/.ssh/hetzner_jarvis {SESSION_PATH} root@100.116.28.82:/opt/jarvis/instagram_session.json")
+        state = await context.storage_state(path=SESSION_PATH)
+
+        # Direkter Grund fuer den letzten Ausfall (2026-08-11): die alte Datei
+        # hatte nur 4 Cookies, OHNE sessionid/ds_user_id -- sah aus wie ein
+        # Login, war aber nie vollstaendig authentifiziert. Hier sofort
+        # pruefen statt das erst Tage spaeter am Server wieder zu entdecken.
+        cookie_names = {c["name"] for c in state.get("cookies", [])}
+        required = {"sessionid", "ds_user_id"}
+        missing = required - cookie_names
+        if missing:
+            print(f"\nWARNUNG: Session sieht UNVOLLSTAENDIG aus, es fehlt: {', '.join(sorted(missing))}.")
+            print("Das war vermutlich beim letzten Mal schon so und der Grund fuer den Ausfall.")
+            print("Bitte im Fenster pruefen ob wirklich der Feed/das eigene Profil sichtbar ist (nicht nur")
+            print("eine Zwischenseite wie 'Speichere Login-Infos?'), dann dieses Skript noch einmal starten.")
+        else:
+            print(f"\nSieht vollstaendig aus (sessionid + ds_user_id vorhanden). Gespeichert: {SESSION_PATH}")
+            print("Jetzt auf den Server kopieren:")
+            print(f"  scp -i ~/.ssh/hetzner_jarvis {SESSION_PATH} root@100.116.28.82:/opt/jarvis/instagram_session.json")
 
         await browser.close()
 
