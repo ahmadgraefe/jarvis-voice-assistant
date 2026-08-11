@@ -127,6 +127,17 @@ PASS_TIMEOUT_SECONDS = 180
 
 CREDIT_ALERT_COOLDOWN_SECONDS = 6 * 3600  # one clear heads-up per ~6h while the issue persists, not every tick
 
+# _run_health_check zaehlt wiederkehrende Fehler ueber 24h, meldet sie aber nur,
+# wenn der letzte Vorfall hoechstens so lange her ist. Ohne diese Schranke war
+# die Meldung "wiederholen sich trotz Self-Improve" nach JEDEM erfolgreichen Fix
+# noch volle 24h zu sehen — live vorgefunden 2026-08-11: der Morgen-Briefing-
+# KeyError wurde um 07:28 korrigiert, hoerte mit dem Neustart um 08:02 auf, und
+# stand trotzdem im 20:00-Tagesabschluss als "wiederholt sich trotz Self-Improve".
+# Genau die Sorte Fehlalarm, die Ahmad den System-Check ignorieren lehrt. Bewusst
+# grosszuegige 6h (nicht 1-2h): der Check laeuft nur einmal taeglich, ein wirklich
+# noch kaputter Pass mit mehrstuendigem Takt soll weiterhin auffallen.
+HEALTH_REPEAT_STILL_ACTIVE_SECONDS = 6 * 3600
+
 TIMER_STATE_PATH = os.path.join(os.path.dirname(__file__), "memory", "pass_timers.json")
 
 DAILY_SUMMARY_HOUR = 20  # local 24h clock — earliest hour the once-daily end-of-day summary may fire
@@ -504,11 +515,30 @@ async def _run_health_check(config: dict) -> str:
 
     since = now - 24 * 3600
     recent_errors = _collect_new_error_lines(since)
-    error_texts = [re.sub(r'^\S+\.log: \[[^\]]+\]\s*', '', e) for e in recent_errors]
     from collections import Counter
-    repeats = [text for text, n in Counter(error_texts).items() if n >= 3]
+    counts = Counter()
+    last_seen = {}
+    for raw in recent_errors:
+        m = re.match(r'^\S+\.log: \[([^\]]+)\]\s*', raw)
+        text = raw[m.end():] if m else raw
+        counts[text] += 1
+        if m:
+            try:
+                epoch = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+            except ValueError:
+                continue
+            last_seen[text] = max(last_seen.get(text, 0), epoch)
+    repeats = [
+        text for text, n in counts.items()
+        if n >= 3 and now - last_seen.get(text, 0) <= HEALTH_REPEAT_STILL_ACTIVE_SECONDS
+    ]
     if repeats:
-        issues.append(f"{len(repeats)} Fehler wiederholen sich seit 24h trotz Self-Improve, z.B.: {repeats[0][:150]}")
+        newest = max(repeats, key=lambda t: last_seen.get(t, 0))
+        ago_h = (now - last_seen.get(newest, now)) / 3600
+        issues.append(
+            f"{len(repeats)} Fehler wiederholen sich trotz Self-Improve und treten weiterhin auf "
+            f"(zuletzt vor {ago_h:.1f}h), z.B.: {newest[:150]}"
+        )
 
     return "\n".join(f"- {i}" for i in issues)
 
