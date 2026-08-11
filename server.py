@@ -1332,6 +1332,28 @@ async def _tool_gmail_check(args: dict) -> str:
     return await gmail_tools.get_recent_emails_summary()
 
 
+async def _tool_check_email_authenticity(args: dict) -> str:
+    """Verbindet zwei schon vorhandene gmail_tools-Funktionen (search_emails,
+    fetch_email_authenticity, 2026-08-11 von skill_growth_pass gebaut, aber
+    durch einen Watchdog-Kill mitten im Lauf nie ans Tool-System angebunden)
+    zu einem einzigen direkt nutzbaren Werkzeug -- der Suchschritt bleibt
+    intern, weil es sonst keinen Weg gibt an eine message_id zu kommen."""
+    query = args["query"].strip()
+    matches = await gmail_tools.search_emails(query, max_results=1)
+    if not matches:
+        return f"Keine E-Mail zu '{query}' gefunden."
+    detail = await gmail_tools.fetch_email_authenticity(matches[0]["id"])
+    return (
+        f"Von: {detail['from']}\nBetreff: {detail['subject']}\nDatum: {detail['date']}\n"
+        f"Return-Path: {detail['return_path'] or '(keiner)'}\nReply-To: {detail['reply_to'] or '(keiner)'}\n"
+        f"Authentication-Results (von Google gesetzt, nicht vom Absender): "
+        f"{detail['authentication_results'] or '(nicht vorhanden -- verdaechtig)'}\n"
+        f"Received-SPF: {detail['received_spf'] or '(nicht vorhanden)'}\n"
+        f"DKIM-Signature vorhanden: {'ja' if detail['dkim_signature'] else 'nein'}\n\n"
+        f"Text-Auszug:\n{detail['body'][:1500]}"
+    )
+
+
 async def _tool_whatsapp_check(args: dict) -> str:
     return await whatsapp_tools.check_new_messages(ai)
 
@@ -2167,6 +2189,28 @@ TOOL_REGISTRY: dict = {
             "input_schema": {"type": "object", "properties": {}, "required": []},
         },
         handler=_tool_gmail_check,
+        speak_result=True,
+        slow=True,
+    ),
+    "check_email_authenticity": ToolSpec(
+        schema={
+            "name": "check_email_authenticity",
+            "description": (
+                "Prueft ob eine bestimmte E-Mail wirklich vom angegebenen Absender stammt oder "
+                "eine Faelschung/ein Phishing-Versuch sein koennte -- liest Googles eigene SPF/"
+                "DKIM/Authentication-Results-Header (die der Absender nicht faelschen kann, weil "
+                "Google sie selbst beim Empfang setzt), Return-Path, Reply-To und den Text/Links. "
+                "query ist eine Gmail-Suche (z.B. 'from:instagram' oder 'Betreffwort'), findet die "
+                "neueste passende Mail. Nutze das wenn Ahmad fragt ob eine Mail echt ist, z.B. eine "
+                "Sicherheits-/Login-Benachrichtigung. Sag vorher 'Ich pruefe die Mail kurz.'"
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "Gmail-Suchbegriff, um die Mail zu finden."}},
+                "required": ["query"],
+            },
+        },
+        handler=_tool_check_email_authenticity,
         speak_result=True,
         slow=True,
     ),

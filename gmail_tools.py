@@ -190,6 +190,61 @@ async def fetch_email_detail(message_id: str) -> dict:
     return await loop.run_in_executor(None, _fetch_email_detail_sync, message_id)
 
 
+def _extract_any_text(payload: dict) -> str:
+    """Wie _extract_plain_text, faellt aber auf den rohen text/html-Teil
+    zurueck. Fuer eine Echtheitspruefung darf der HTML-Teil nicht verloren
+    gehen: gefaelschte "Sicherheitsmitteilungen" haben oft NUR einen
+    HTML-Body, und genau dort stehen die echten (gefaelschten) Ziel-URLs."""
+    plain = _extract_plain_text(payload)
+    if plain:
+        return plain
+
+    def walk(part: dict) -> str:
+        if part.get("mimeType") == "text/html" and part.get("body", {}).get("data"):
+            return base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8", errors="replace")
+        for sub in part.get("parts", []) or []:
+            found = walk(sub)
+            if found:
+                return found
+        return ""
+
+    return walk(payload)
+
+
+def _fetch_email_authenticity_sync(message_id: str) -> dict:
+    creds = _get_credentials()
+    service = build("gmail", "v1", credentials=creds)
+    msg = service.users().messages().get(userId="me", id=message_id, format="full").execute()
+    headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
+    return {
+        "id": msg["id"],
+        "from": headers.get("From", ""),
+        "subject": headers.get("Subject", "(kein Betreff)"),
+        "date": headers.get("Date", ""),
+        "return_path": headers.get("Return-Path", ""),
+        "reply_to": headers.get("Reply-To", ""),
+        # Von Googles eigenen Empfangsservern gesetzt, nicht vom Absender —
+        # deshalb ueberhaupt als Echtheitsbeweis brauchbar.
+        "authentication_results": (
+            headers.get("Authentication-Results", "")
+            or headers.get("ARC-Authentication-Results", "")
+        ),
+        "received_spf": headers.get("Received-SPF", ""),
+        "dkim_signature": headers.get("DKIM-Signature", ""),
+        "body": _extract_any_text(msg["payload"]),
+    }
+
+
+async def fetch_email_authenticity(message_id: str) -> dict:
+    """Die Header EINER Mail, die man fuer die Frage 'kommt das wirklich vom
+    angegebenen Absender?' braucht: Googles SPF/DKIM/DMARC-Ergebnis,
+    Return-Path, Reply-To — plus der Body (notfalls HTML) fuer die Links.
+    fetch_email_detail liefert die bewusst nicht, dort geht es um
+    Antwort-Threading. Reiner Lesezugriff, deckt gmail.readonly ab."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _fetch_email_authenticity_sync, message_id)
+
+
 def _create_draft_reply_sync(to: str, subject: str, body: str, thread_id: str, in_reply_to: str = "") -> str:
     creds = _get_credentials()
     service = build("gmail", "v1", credentials=creds)
