@@ -936,12 +936,42 @@ def _write_scan_cursor(epoch: float):
 # gefahrlos komplett ignoriert werden. Deckt zugleich alle anderen Alarme ab,
 # deren Text zufaellig "Fehler"/"error" enthaelt (Recherche-Digest,
 # Jerome-Antworten, die Guthaben-Warnung in main()).
+#
+# Drittes Leck derselben Art (2026-08-11, live vorgefunden): Erfolgs-Zeilen,
+# die FREIEN Text von woanders in das Log echoen, koennen das Wort "Fehler"
+# rein inhaltlich enthalten, ohne dass irgendetwas schiefgegangen ist.
+# Ausloeser war "Screen-Awareness erfasst: Ahmad beschaeftigt sich gerade mit
+# der Ueberpruefung und Fehlerbehandlung in seinem Bash-Script." — eine voll
+# erfolgreiche Vision-Beschreibung von Ahmads Bildschirm, in der "Fehler-"
+# nur als Teilstring in "Fehlerbehandlung" steckt. Das hat einen kompletten
+# Claude-Code-Lauf mit Datei-/Shell-Zugriff und potentiellem systemctl-Neustart
+# beider Dienste ausgeloest, fuer gar kein Problem. Dieselbe Falle bei den
+# Skill-Growth-Zeilen (Claude Codes Zusammenfassung + die vom Modell
+# formulierte Faehigkeits-Luecke, exakt analog zu "self-improve ergebnis:")
+# und beim Morgen-Briefing, dessen Text die 24h-Self-Improve-Zusammenfassung
+# woertlich mitfuehrt ("... N Fehler behoben ..."). Alle diese Zeilen werden
+# nur im Erfolgsfall geschrieben; ihre echten Fehlschlaege loggen an derselben
+# Stelle separat mit "FEHLER ..."/"fehlgeschlagen" und bleiben sichtbar.
+# Die beiden Self-Improve-Status-Marker sind bewusst PRAEZISE und nicht bloss
+# "self-improve:" (so stand es bis 2026-08-11): das pauschale Prefix hat auch
+# "Self-Improve: Neustart von jarvis-brain fehlgeschlagen: ..." verschluckt —
+# genau der Fehlschlag, der einen erfolgreichen Fix wirkungslos macht (siehe
+# den systemctl-Block in self_improve_pass) und darum als einziger aus diesem
+# Bereich sichtbar bleiben MUSS. Es sind nur diese zwei Status-Zeilen, die
+# ueberhaupt "Fehler"/"error" enthalten, alle anderen "Self-Improve:"-Zeilen
+# matchen den Scanner ohnehin nicht.
 SELF_IMPROVE_LOG_MARKERS = (
-    "self-improve:",              # "keine neuen Fehler..." / "N neue Fehler gefunden..."
+    "self-improve: keine neuen fehler",   # "...seit dem letzten Scan."
+    "neue fehler gefunden, delegiere",    # "Self-Improve: N neue Fehler gefunden, delegiere an..."
     "self-improve ergebnis:",     # Claude Code's own summary, often quotes the error text
     "selbstreflektion gespeichert:",
     "alarm gesendet:",            # _alert()'s echo of an outgoing WhatsApp text
     "alarm (kein alert_phone",    # ...und dieselbe Zeile, wenn keine Nummer konfiguriert ist
+    "screen-awareness erfasst:",  # Vision-Beschreibung von Ahmads Bildschirm, freier Text
+    "skill-growth (luecke)",      # die vom Modell formulierte Faehigkeits-Luecke, freier Text
+    "skill-growth (eigene idee)", # dito, der Ideen-Zweig
+    "skill-growth ergebnis:",     # Claude Codes eigene Zusammenfassung, wie bei Self-Improve
+    "morgen-briefing gesendet:",  # enthaelt die Self-Improve-/Skill-Growth-Zusammenfassung
 )
 
 
