@@ -64,7 +64,9 @@ JARVIS_LOGS = [
 ]
 LOG_PATH = os.path.join(_LOG_DIR, "jarvis-brain.log")
 
-INSTAGRAM_INTERVAL_SECONDS = 90 * 60          # aggressive cadence, ~every 1.5h
+INSTAGRAM_INTERVAL_SECONDS = 4 * 60 * 60      # Ahmad, 2026-08-11: 90min (16x/Tag ueber 21
+# Accounts) war zu viel -- 6x/Tag reicht fuer Follower-Trend + Fanplace-Churn-Check locker,
+# senkt gleichzeitig unnoetig haeufige automatisierte Profil-Besuche (Ban-Risiko-Reduktion).
 BUSINESS_CYCLE_INTERVAL_SECONDS = 5 * 60 * 60  # discovery/sheet-sync/video-analysis/trial-reel
 RESEARCH_INTERVAL_SECONDS = 12 * 60 * 60      # Ahmad wants 1-2 research WhatsApp updates/day, not 4-6
 SELF_IMPROVE_INTERVAL_SECONDS = 30 * 60       # Ahmad (2026-08-06): "er soll IMMER auf Fehlersuche gehen" —
