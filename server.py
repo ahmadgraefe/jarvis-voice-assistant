@@ -1288,6 +1288,23 @@ async def _tool_add_competitor(args: dict) -> str:
     return f"@{handle} zur Konkurrenz-Beobachtung hinzugefuegt. Sheet-Sync: {sync_result}"
 
 
+async def _tool_remove_competitor(args: dict) -> str:
+    """remove_competitor_account() existierte schon in instagram_tools.py
+    (Ahmad, 2026-08-07), war aber nie an ein aufrufbares Tool angebunden --
+    live entdeckt 2026-08-11, als Ahmad die Konkurrenzliste aufraeumen wollte
+    und es dafuer keinen Weg gab."""
+    handle = args["handle"].strip().lstrip("@")
+    removed = instagram_tools.remove_competitor_account(handle)
+    if not removed:
+        return f"@{handle} stand nicht auf der Konkurrenzliste."
+    with open(CONFIG_PATH, "r") as f:
+        config_now = json.load(f)
+    sync_result = await sheets_tools.sync_competitor_accounts(
+        config_now.get("competitor_accounts", []), instagram_tools.get_competitor_niches()
+    )
+    return f"@{handle} aus der Konkurrenz-Beobachtung entfernt. Sheet-Sync: {sync_result}"
+
+
 async def _tool_screen_click(args: dict) -> str:
     return await screen_control.click_on(args["description"], ai)
 
@@ -2057,6 +2074,24 @@ TOOL_REGISTRY: dict = {
             },
         },
         handler=_tool_add_competitor,
+        speak_result=True,
+    ),
+    "remove_competitor": ToolSpec(
+        schema={
+            "name": "remove_competitor",
+            "description": (
+                "Entfernt einen Konkurrenz-Account wieder aus der aktiven Beobachtung (z.B. weil er "
+                "sich als kein echter 1:1-Nischen-/Content-Fit herausgestellt hat) -- wird auch aus "
+                "der Target Creator List im Sheet entfernt. Nutze das wenn Ahmad sagt ein "
+                "beobachteter Account passt nicht/soll raus."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {"handle": {"type": "string", "description": "Ohne @."}},
+                "required": ["handle"],
+            },
+        },
+        handler=_tool_remove_competitor,
         speak_result=True,
     ),
     "screen_click": ToolSpec(
