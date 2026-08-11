@@ -77,7 +77,15 @@ body {
 .icon-btn.active { background: #FF8A2E; border-color: #FF8A2E; color: #fff; }
 
 /* ===== Tab-Ansichten ===== */
-.tab-view { display: none; min-height: 0; height: 100%; }
+/* min-width:0 ist hier Pflicht, nicht Kosmetik: #app-shell ist ein Grid ohne
+   explizite grid-template-columns, die implizite Spalte sizt sich sonst am
+   MIN-CONTENT des breitesten Kindes -- ein langes, leerzeichenloses Wort
+   (z.B. eine rohe URL in einer proaktiven Jarvis-Nachricht) zieht dadurch das
+   GANZE Grid breiter als 100vw und schiebt die Kopfzeilen-Icons aus dem
+   sichtbaren Bereich, obwohl die Sprechblase selbst korrekt umbricht (live
+   beobachtet, 2026-08-12: word-wrap:break-word auf .bubble verhindert zwar
+   das VISUELLE Ueberlaufen, aber nicht diesen Beitrag zur Grid-Breitenberechnung). */
+.tab-view { display: none; min-height: 0; min-width: 0; height: 100%; }
 .tab-view.active { display: flex; flex-direction: column; }
 
 #voice-view { padding: 6px 18px calc(14px + env(safe-area-inset-bottom)); gap: 10px; }
