@@ -14,6 +14,7 @@ import shutil
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import anthropic
@@ -1436,6 +1437,239 @@ async def _tool_check_email_authenticity(args: dict) -> str:
     )
 
 
+# --- Facebook-Kontosicherheit ------------------------------------------------
+# Ahmad bekam mehrere Sicherheitswarnungen, die nach einem Kontodiebstahl
+# aussahen (2026-08-11). Bis dahin konnte Jarvis dazu gar nichts tun.
+# Was hier bewusst NICHT passiert: Jarvis loggt sich nicht bei Facebook ein und
+# tippt kein Passwort. Es gibt keine Facebook-Zugangsdaten in config.json, keine
+# Meta-API fuer Passwortwechsel/Session-Logout, und "Nie Zugangsdaten/Passwoerter
+# fuer Instagram oder andere Dienste eingeben oder verwalten" ist eine von Ahmads
+# festen Grenzen (claude_app_status.md). Der ehrliche, machbare Weg ist deshalb
+# zweigeteilt: (1) die Warnungen selbst anhand echter Gmail-Header pruefen —
+# echte Meta-Mail oder Phishing? — und (2) die offiziellen Meta-Sicherheitsseiten
+# direkt auf Ahmads eingeloggtem Browser oeffnen, in der richtigen Reihenfolge,
+# per getippter URL statt ueber einen Link aus der verdaechtigen Mail.
+
+_FACEBOOK_SECURE_TOOL = "facebook_secure"
+
+# Absenderdomains, unter denen Meta wirklich verschickt.
+_META_SENDER_DOMAINS = (
+    "facebookmail.com", "facebook.com", "fb.com", "meta.com", "metamail.com",
+    "support.facebook.com", "instagram.com", "mail.instagram.com",
+)
+# Domains, auf die eine echte Meta-Mail verlinken darf (inkl. Klick-Tracking).
+_META_LINK_DOMAINS = _META_SENDER_DOMAINS + ("fbcdn.net", "messenger.com", "accountscenter.facebook.com")
+
+# Offizielle Einstiegsseiten, per Hand getippt statt aus einer Mail geklickt.
+_FACEBOOK_SECURE_STEPS = [
+    (
+        "Aktive Anmeldungen / Geraete",
+        "https://accountscenter.facebook.com/password_and_security/login_activity",
+        "Zeigt jedes Geraet und jeden Ort, wo das Konto gerade eingeloggt ist — "
+        "alles Unbekannte dort abmelden.",
+    ),
+    (
+        "Passwort aendern",
+        "https://accountscenter.facebook.com/password_and_security/password/change",
+        "Neues, nirgends sonst benutztes Passwort setzen. Facebook bietet dabei an, "
+        "alle anderen Geraete abzumelden — das annehmen.",
+    ),
+    (
+        "Zwei-Faktor-Authentifizierung",
+        "https://accountscenter.facebook.com/password_and_security/two_factor",
+        "Ohne zweiten Faktor bringt ein neues Passwort wenig, wenn jemand die Mail "
+        "mitliest — hier Authenticator-App aktivieren.",
+    ),
+]
+_FACEBOOK_RECOVERY_STEP = (
+    "Meta-Meldeformular fuer uebernommene Konten",
+    "https://www.facebook.com/hacked",
+    "Der offizielle Weg zurueck, wenn der Zugang schon weg ist (Passwort geaendert, ausgesperrt).",
+)
+
+
+def _fb_sender_domain(from_header: str) -> str:
+    """Domain aus einem From-Header ('Facebook <security@facebookmail.com>')."""
+    match = re.search(r"<([^>]+)>", from_header or "")
+    address = match.group(1) if match else (from_header or "")
+    if "@" not in address:
+        return ""
+    return address.rsplit("@", 1)[1].strip().strip(">").lower()
+
+
+def _fb_is_meta_domain(domain: str, allowed: tuple) -> bool:
+    return bool(domain) and any(domain == d or domain.endswith("." + d) for d in allowed)
+
+
+def _fb_foreign_links(body: str) -> list:
+    """Verlinkte Domains im Mailtext, die NICHT zu Meta gehoeren — das
+    verlaesslichste Phishing-Signal neben den Auth-Headern."""
+    foreign = []
+    for url in re.findall(r"https?://[^\s\"'<>)\]]+", body or ""):
+        domain = urlparse(url).netloc.lower().split(":")[0]
+        if domain and not _fb_is_meta_domain(domain, _META_LINK_DOMAINS) and domain not in foreign:
+            foreign.append(domain)
+    return foreign
+
+
+def _fb_judge_alert(detail: dict) -> tuple:
+    """(Urteil, Begruendungen) fuer EINE Warnmail — ausschliesslich aus echten
+    Headern abgeleitet, nie geraten. 'unklar' ist ein erlaubtes Ergebnis."""
+    auth = (detail.get("authentication_results") or "").lower()
+    domain = _fb_sender_domain(detail.get("from", ""))
+    reasons = []
+
+    if not _fb_is_meta_domain(domain, _META_SENDER_DOMAINS):
+        reasons.append(f"Absenderdomain '{domain or 'unbekannt'}' gehoert NICHT zu Meta")
+    if not auth:
+        reasons.append("keine Authentication-Results von Google vorhanden — Echtheit nicht pruefbar")
+    else:
+        for label in ("spf", "dkim", "dmarc"):
+            if f"{label}=pass" in auth:
+                continue
+            if f"{label}=fail" in auth or f"{label}=softfail" in auth:
+                reasons.append(f"{label.upper()}-Pruefung fehlgeschlagen")
+            else:
+                reasons.append(f"kein {label.upper()}=pass im Header")
+
+    foreign = _fb_foreign_links(detail.get("body", ""))
+    if foreign:
+        reasons.append("Links auf fremde Domains: " + ", ".join(foreign[:5]))
+
+    if not auth:
+        return "UNKLAR", reasons
+    hard_fail = any(k in r for r in reasons for k in ("NICHT zu Meta", "fehlgeschlagen"))
+    if hard_fail:
+        return "SEHR WAHRSCHEINLICH GEFAELSCHT", reasons
+    if reasons:
+        return "AUFFAELLIG", reasons
+    return "ECHT VON META", reasons
+
+
+async def _facebook_check_alerts(args: dict) -> str:
+    """Rein lesend: holt die Facebook-Sicherheitswarnungen aus Gmail und prueft
+    jede einzeln auf Echtheit. Kein Bestaetigungs-Gate noetig."""
+    query = (args.get("query") or "").strip() or (
+        "newer_than:30d (facebook OR facebookmail OR meta) "
+        "(anmeldung OR anmeldeversuch OR passwort OR sicherheit OR login OR password "
+        "OR security OR suspicious OR verifizierung OR gesperrt)"
+    )
+    try:
+        max_results = int(args.get("max_results") or 5)
+    except (TypeError, ValueError):
+        max_results = 5
+    max_results = max(1, min(max_results, 10))
+
+    matches = await gmail_tools.search_emails(query, max_results=max_results)
+    if not matches:
+        return (
+            f"Keine passende Facebook-Sicherheitsmail im Postfach gefunden (Suche: {query}).\n"
+            "Das heisst NICHT, dass das Konto sicher ist — es heisst nur, dass in Gmail nichts "
+            "dazu liegt. Den Kontostand selbst kann ich nicht sehen, dafuer 'sichern' nutzen."
+        )
+
+    lines = [f"{len(matches)} Warnmail(s) geprueft (Quelle: Gmail-Header, nichts geraten):"]
+    genuine = fake = 0
+    for i, match in enumerate(matches, 1):
+        try:
+            detail = await gmail_tools.fetch_email_authenticity(match["id"])
+        except Exception as e:
+            lines.append(f"{i}. {match.get('subject', '(kein Betreff)')} — ERROR: Header nicht abrufbar ({e})")
+            continue
+        verdict, reasons = _fb_judge_alert(detail)
+        if verdict == "ECHT VON META":
+            genuine += 1
+        elif verdict == "SEHR WAHRSCHEINLICH GEFAELSCHT":
+            fake += 1
+        lines.append(
+            f"{i}. [{verdict}] {detail['subject']}\n"
+            f"   Von: {detail['from']} | {detail['date']}\n"
+            f"   Befund: {'; '.join(reasons) if reasons else 'SPF/DKIM/DMARC sauber, Absender und Links gehoeren Meta'}"
+        )
+
+    lines.append("")
+    if fake:
+        lines.append(
+            f"{fake} Mail(s) sind sehr wahrscheinlich Phishing: nichts darin anklicken, "
+            "keine Daten eingeben. Solche Mails sind oft die URSACHE der Panik, nicht der Beweis "
+            "fuer einen Hack."
+        )
+    if genuine:
+        lines.append(
+            f"{genuine} Mail(s) kommen echt von Meta — dann hat es wirklich Anmeldeversuche gegeben "
+            "und das Konto sollte jetzt gesichert werden."
+        )
+    lines.append(
+        "Grenze dieser Pruefung: ich lese nur die Mails. Ob im Konto gerade ein fremdes Geraet "
+        "eingeloggt ist, steht nur bei Facebook selbst — dafuer diese Aktion mit action='sichern' "
+        "aufrufen, dann oeffne ich die offiziellen Seiten auf deinem Mac."
+    )
+    return "\n".join(lines)
+
+
+async def _tool_facebook_secure(args: dict) -> str:
+    action = (args.get("action") or "pruefen").strip().lower()
+    if action in ("pruefen", "prüfen", "check", "read"):
+        return await _facebook_check_alerts(args)
+    if action not in ("sichern", "secure", "absichern"):
+        return (
+            f"ERROR: Unbekannte Aktion '{action}'. Moeglich sind 'pruefen' (nur die Warnmails lesen "
+            "und auf Echtheit pruefen) und 'sichern' (Meta-Sicherheitsseiten auf dem Mac oeffnen)."
+        )
+
+    access_lost = bool(args.get("access_lost", False))
+    steps = list(_FACEBOOK_SECURE_STEPS)
+    if access_lost:
+        steps.insert(0, _FACEBOOK_RECOVERY_STEP)
+
+    # Bestaetigungs-Gate: das hier greift sichtbar in Ahmads laufende Sitzung ein
+    # (Tabs oeffnen sich auf seinem Mac) und leitet einen Passwortwechsel plus
+    # Abmelden aller Geraete ein — nichts, was ohne sein Ja passieren darf.
+    if not memory.is_self_built_skill_confirmed(_FACEBOOK_SECURE_TOOL) and not args.get("confirmed"):
+        listing = "\n".join(f"- {name}: {url}" for name, url, _ in steps)
+        return (
+            "NOCH NICHTS PASSIERT — dafuer brauche ich Ahmads ausdrueckliche Bestaetigung.\n"
+            "Was ich tun wuerde: nacheinander diese offiziellen Meta-Seiten in deinem eingeloggten "
+            "Browser auf dem Mac oeffnen (URLs selbst getippt, kein Link aus der verdaechtigen Mail):\n"
+            f"{listing}\n"
+            "Du wuerdest dann dort selbst die fremden Geraete abmelden, das Passwort aendern und 2FA "
+            "einschalten. Ich tippe weder Passwort noch Bestaetigungscode und melde von mir aus kein "
+            "Geraet ab — dazu habe ich keine Facebook-Zugangsdaten, und Zugangsdaten zu verwalten ist "
+            "eine deiner festen Grenzen. Soll ich die Seiten oeffnen?"
+        )
+
+    opened, failed = [], []
+    for name, url, hint in steps:
+        result = await browser_tools.open_url(url)
+        if isinstance(result, dict) and not result.get("success", True):
+            failed.append(f"- {name} ({url}): {result.get('error', 'unbekannter Fehler')}")
+        else:
+            opened.append(f"- {name}: {url}\n  {hint}")
+        await asyncio.sleep(1)
+
+    if not opened:
+        # Ehrlich scheitern statt Erfolg melden — und das Gate bleibt offen,
+        # damit die erste ECHTE Ausfuehrung weiterhin bestaetigt werden muss.
+        return (
+            "ERROR: Keine einzige Seite liess sich auf dem Mac oeffnen (Mac aus oder Tailscale "
+            "unten?). Es ist nichts gesichert worden.\n" + "\n".join(failed)
+        )
+
+    if not memory.is_self_built_skill_confirmed(_FACEBOOK_SECURE_TOOL):
+        memory.mark_self_built_skill_confirmed(_FACEBOOK_SECURE_TOOL)
+
+    lines = ["Auf deinem Mac geoeffnet, in dieser Reihenfolge abarbeiten:"]
+    lines.extend(opened)
+    if failed:
+        lines.append("Nicht geoeffnet:")
+        lines.extend(failed)
+    lines.append(
+        "Ab hier bist du dran: ich sehe die Seiten nicht und fasse weder Passwort noch "
+        "Bestaetigungscode an. Sag mir, was bei 'Aktive Anmeldungen' steht, dann gehen wir es durch."
+    )
+    return "\n".join(lines)
+
+
 async def _tool_whatsapp_check(args: dict) -> str:
     return await whatsapp_tools.check_new_messages(ai)
 
@@ -2336,6 +2570,62 @@ TOOL_REGISTRY: dict = {
         handler=_tool_check_email_authenticity,
         speak_result=True,
         slow=True,
+    ),
+    "facebook_secure": ToolSpec(
+        schema={
+            "name": "facebook_secure",
+            "description": (
+                "Fuer Facebook-Sicherheitswarnungen und den Verdacht, dass jemand fremdes im Konto "
+                "ist ('mein Facebook wurde gehackt', 'ich bekomme staendig Anmeldewarnungen'). "
+                "Zwei Aktionen: action='pruefen' (Standard, rein lesend) holt die Facebook-Warnmails "
+                "aus Gmail und sagt pro Mail, ob sie ECHT von Meta kommt oder Phishing ist — "
+                "anhand von Googles SPF/DKIM/DMARC-Headern, der Absenderdomain und der verlinkten "
+                "Domains, alles aus echten Headern, nie geraten. action='sichern' oeffnet die "
+                "offiziellen Meta-Seiten (aktive Anmeldungen/Geraete, Passwort aendern, 2FA) der "
+                "Reihe nach im eingeloggten Browser auf Ahmads Mac, mit selbst getippten URLs statt "
+                "eines Links aus der verdaechtigen Mail; mit access_lost=true kommt zusaetzlich das "
+                "Meta-Meldeformular fuer uebernommene Konten davor. "
+                "WICHTIG und ehrlich sagen, nicht beschoenigen: Jarvis loggt sich NICHT bei Facebook "
+                "ein, aendert das Passwort NICHT selbst und meldet keine Geraete ab — es gibt keine "
+                "Facebook-Zugangsdaten und keine Meta-API dafuer, und Zugangsdaten zu verwalten ist "
+                "eine von Ahmads festen Grenzen. Den Kontostand selbst (welches Geraet eingeloggt "
+                "ist) kann Jarvis nicht sehen, den liest Ahmad auf der geoeffneten Seite ab. "
+                "'sichern' greift sichtbar in Ahmads Sitzung ein und braucht beim ersten Mal seine "
+                "ausdrueckliche Bestaetigung (confirmed=true)."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["pruefen", "sichern"],
+                        "description": "'pruefen' = Warnmails auf Echtheit pruefen (Default), 'sichern' = Meta-Sicherheitsseiten oeffnen.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Nur bei 'pruefen': eigene Gmail-Suche statt der Standardsuche nach Facebook-Sicherheitsmails der letzten 30 Tage.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Nur bei 'pruefen': wie viele Mails geprueft werden, 1-10, Default 5.",
+                    },
+                    "access_lost": {
+                        "type": "boolean",
+                        "description": "Nur bei 'sichern': true, wenn Ahmad schon ausgesperrt ist — dann kommt zuerst facebook.com/hacked.",
+                    },
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "Nur setzen, wenn Ahmad das Oeffnen der Sicherungs-Seiten ausdruecklich bestaetigt hat.",
+                    },
+                },
+                "required": [],
+            },
+        },
+        handler=_tool_facebook_secure,
+        speak_result=True,
+        slow=True,
+        verbose_reply=True,  # pro Mail ein Urteil plus Begruendung -- in 250
+        # Tokens waere das mitten im Satz abgeschnitten
     ),
     "whatsapp_check": ToolSpec(
         schema={
