@@ -86,6 +86,8 @@ import content_strategy
 import slt_bio_tools
 import goal_tracker
 import push_notifications
+import habit_tracker
+import finance_tracker
 
 LUNA_VALE_STATUS_PATH = os.path.join(os.path.dirname(__file__), "claude_app_status.md")
 
@@ -1416,6 +1418,21 @@ async def _tool_remember(args: dict) -> str:
 
 # --- Batch: Ziel-/Projekt-Tracking (Tier 1, Punkt 8) ------------------------
 
+# --- Batch: Ahmads Cockpit (2026-08-11) -------------------------------------
+
+async def _tool_habit_add(args: dict) -> str:
+    return habit_tracker.add_habit(args["name"].strip())
+
+
+async def _tool_habit_check(args: dict) -> str:
+    return habit_tracker.check_in(args["name"].strip())
+
+
+async def _tool_log_meal(args: dict) -> str:
+    memory.add_meal_entry(args["text"].strip())
+    return "Mahlzeit eingetragen."
+
+
 async def _tool_track_goal(args: dict) -> str:
     return goal_tracker.add_goal(args["description"].strip(), args.get("check_in_days", 3))
 
@@ -2355,6 +2372,57 @@ TOOL_REGISTRY: dict = {
     ),
 
     # --- Batch: Ziel-/Projekt-Tracking ---
+    "habit_add": ToolSpec(
+        schema={
+            "name": "habit_add",
+            "description": (
+                "Legt eine neue, wiederkehrende taegliche Gewohnheit fuer Ahmads Cockpit an "
+                "(z.B. 'Sport', 'Lesen', 'Meditation'). Nutze das SELBSTSTAENDIG wenn Ahmad "
+                "sagt, dass er ab jetzt regelmaessig etwas tun/tracken will."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "Kurzer Name der Gewohnheit."}},
+                "required": ["name"],
+            },
+        },
+        handler=_tool_habit_add,
+        speak_result=False,
+    ),
+    "habit_check": ToolSpec(
+        schema={
+            "name": "habit_check",
+            "description": (
+                "Markiert eine bestehende Gewohnheit als heute erledigt (name muss nur ein Teil "
+                "des urspruenglichen Namens treffen). Nutze das wenn Ahmad sagt, dass er etwas "
+                "heute schon gemacht hat, das eine seiner Gewohnheiten ist."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+        },
+        handler=_tool_habit_check,
+        speak_result=True,
+    ),
+    "log_meal": ToolSpec(
+        schema={
+            "name": "log_meal",
+            "description": (
+                "Traegt eine Mahlzeit in Ahmads Ernaehrungs-Tagebuch (Cockpit) ein. Reines Log, "
+                "KEINE Kalorien-/Makro-Berechnung (dafuer gibt es keine Datenquelle, nichts "
+                "schaetzen). Nutze das wenn Ahmad erwaehnt was er gegessen/getrunken hat."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {"text": {"type": "string", "description": "Was gegessen/getrunken wurde, so wie Ahmad es gesagt hat."}},
+                "required": ["text"],
+            },
+        },
+        handler=_tool_log_meal,
+        speak_result=False,
+    ),
     "track_goal": ToolSpec(
         schema={
             "name": "track_goal",
@@ -3108,6 +3176,150 @@ async def serve_index():
 @app.get("/mobile")
 async def serve_mobile():
     return FileResponse(os.path.join(os.path.dirname(__file__), "frontend", "mobile.html"))
+
+
+# --- Ahmads Cockpit (2026-08-11) --------------------------------------------
+# Kein Jinja/Templating im Projekt (bewusst, siehe Recherche vor dem Bauen) --
+# statischer Shell + JS-fetch() auf einen JSON-Endpunkt, gleiches Prinzip wie
+# der Rest des Frontends (main.js/orb.js holen ihre Daten auch per WS/fetch,
+# nie server-seitig in HTML gebacken).
+
+def _normalize_ig_count(raw):
+    """'61.800' (deutsches Tausenderformat) oder '14.8K'/'1.2M' (Instagrams
+    eigene Kurzschreibweise) -> int. None wenn nicht parsbar -- nie raten."""
+    if not raw:
+        return None
+    s = str(raw).strip().upper()
+    try:
+        if s.endswith("K"):
+            return int(float(s[:-1].replace(",", ".")) * 1_000)
+        if s.endswith("M"):
+            return int(float(s[:-1].replace(",", ".")) * 1_000_000)
+        return int(s.replace(".", "").replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _latest_instagram_snapshots() -> list:
+    """Liest memory/instagram_snapshots.jsonl direkt -- es gibt keine fertige
+    strukturierte Trend-Funktion in instagram_tools.py (format_trend_summary
+    gibt nur vorformatierten Text zurueck), also hier selbst das Neueste plus
+    Vorherige pro Account aus der Datei ziehen."""
+    path = os.path.join(os.path.dirname(__file__), "memory", "instagram_snapshots.jsonl")
+    if not os.path.exists(path):
+        return []
+    by_handle = {}
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            handle = entry.get("handle")
+            if not handle or entry.get("error"):
+                continue
+            by_handle.setdefault(handle, []).append(entry)
+
+    own_handles = set(config.get("luna_vale_accounts", []))
+    result = []
+    for handle, entries in by_handle.items():
+        if handle not in own_handles:
+            continue
+        entries.sort(key=lambda e: e.get("timestamp", ""))
+        latest = entries[-1]
+        prev = entries[-2] if len(entries) > 1 else None
+        followers = _normalize_ig_count(latest.get("followers"))
+        prev_followers = _normalize_ig_count(prev.get("followers")) if prev else None
+        delta = (followers - prev_followers) if followers is not None and prev_followers is not None else None
+        trend = None if delta is None else ("up" if delta > 0 else ("down" if delta < 0 else "flat"))
+        result.append({
+            "handle": handle,
+            "followers": followers,
+            "posts": _normalize_ig_count(latest.get("posts")),
+            "delta": delta,
+            "trend": trend,
+            "timestamp": latest.get("timestamp"),
+        })
+    result.sort(key=lambda e: e["handle"])
+    return result
+
+
+def _goals_for_cockpit() -> list:
+    now = time.time()
+    result = []
+    for g in goal_tracker.get_active_goals():
+        last_checked = g.get("last_checked") or 0
+        check_in_days = g.get("check_in_days", 3)
+        days_since = (now - last_checked) / 86400 if last_checked else None
+        due = days_since is not None and days_since >= check_in_days
+        notes = g.get("notes") or []
+        result.append({
+            "description": g["description"],
+            "check_in_days": check_in_days,
+            "days_since_check_in": round(days_since, 1) if days_since is not None else None,
+            "due": due,
+            "last_note": notes[-1]["text"] if notes else None,
+        })
+    return result
+
+
+@app.get("/cockpit")
+async def serve_cockpit():
+    return FileResponse(os.path.join(os.path.dirname(__file__), "frontend", "cockpit.html"))
+
+
+@app.get("/api/cockpit")
+async def api_cockpit():
+    try:
+        finance = await finance_tracker.get_recent_month_summary()
+    except Exception as e:
+        finance = None
+        print(f"  Cockpit: Finanz-Abruf fehlgeschlagen: {e}", flush=True)
+
+    try:
+        winners = await sheets_tools.read_winner_tracking(limit=6)
+    except Exception as e:
+        winners = []
+        print(f"  Cockpit: Winner-Tracking-Abruf fehlgeschlagen: {e}", flush=True)
+
+    goals = _goals_for_cockpit()
+    habits = habit_tracker.get_habits_with_status()
+
+    # Ehrlicher, regelbasierter Hinweis statt einer erfundenen/per LLM
+    # generierten Einschaetzung -- keine zusaetzlichen Kosten/Latenz bei
+    # jedem Seitenaufruf, nur echte, nachvollziehbare Beobachtungen.
+    nudge = None
+    due_goal = next((g for g in goals if g["due"]), None)
+    open_habit = next((h for h in habits if not h["done_today"]), None)
+    if due_goal:
+        nudge = f"Ziel faellig: \"{due_goal['description']}\" wartet seit {due_goal['days_since_check_in']} Tagen auf ein Update."
+    elif open_habit:
+        nudge = f"Noch offen heute: {open_habit['name']}."
+
+    return JSONResponse({
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "finance": finance or None,
+        "goals": goals,
+        "instagram": _latest_instagram_snapshots(),
+        "winners": winners,
+        "habits": habits,
+        "meals": memory.get_recent_meals(days=1),
+        "health": memory.get_latest_health(),
+        "nudge": nudge,
+    })
+
+
+@app.post("/api/health/import")
+async def health_import(payload: dict):
+    """Empfaengt HealthKit-Exporte von der iOS-App 'Health Auto Export'
+    (REST-Automation) -- Apple Health selbst hat keine Server-API, das ist
+    die etablierte Bruecke. Rohes Payload wird IMMER unveraendert gespeichert
+    (nichts geht verloren, auch wenn die folgende Best-Effort-Interpretation
+    daneben liegt). Kein Auth-Check, gleiches Modell wie /shortcut und /
+    -- der Server ist ausschliesslich ueber Tailscale erreichbar, das ist
+    hier wie ueberall sonst im Projekt die tatsaechliche Grenze."""
+    memory.add_health_import(payload)
+    return {"received": True}
 
 
 @app.post("/transcribe")
