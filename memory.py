@@ -815,3 +815,100 @@ def search_screen_awareness(query: str, max_results: int = 15) -> str:
     if not matches:
         return f"Keine Bildschirm-Beobachtungen zu '{query}' in den letzten {SCREEN_AWARENESS_RETENTION_DAYS} Tagen gefunden."
     return "\n".join(f"[{e['timestamp']}] {e['text']}" for e in matches)
+
+
+# --- Mahlzeiten-Log (Ahmads Cockpit, 2026-08-11) ---
+# Gleiches Prinzip wie der Screen-Awareness-Log oben: ein einfaches, simples
+# Tagebuch, KEIN Kalorien-/Makro-Tracking (dafuer gibt es keine Datenquelle,
+# nichts erfinden). Eigener Log statt remember()/Profil-System, damit taegliche
+# Mahlzeiten-Eintraege nicht das kuratierte Fakten-Gedaechtnis verwaessern.
+
+MEAL_LOG_PATH = os.path.join(MEMORY_DIR, "meal_log.jsonl")
+
+
+def add_meal_entry(text: str):
+    if not text:
+        return
+    os.makedirs(MEMORY_DIR, exist_ok=True)
+    with open(MEAL_LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"timestamp": time.strftime("%Y-%m-%d %H:%M:%S"), "text": text}, ensure_ascii=False) + "\n")
+
+
+def get_recent_meals(days: int = 3) -> list:
+    if not os.path.exists(MEAL_LOG_PATH):
+        return []
+    entries = []
+    with open(MEAL_LOG_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    cutoff = time.time() - days * 86400
+    return [e for e in entries if _parse_timestamp(e.get("timestamp", "")) >= cutoff]
+
+
+# --- Apple-Health-Bruecke (Ahmads Cockpit, 2026-08-11) ---
+# Apple Health selbst hat keine Server-API -- die etablierte Loesung ist die
+# iOS-App "Health Auto Export" (REST-Automation, schickt HealthKit-Daten
+# periodisch als JSON an eine eigene URL). Rohes Payload wird IMMER
+# unveraendert geloggt, egal ob die folgende Best-Effort-Extraktion die
+# tatsaechliche Feldform trifft -- die wird erst mit einem echten Payload von
+# Ahmads Geraet final verifiziert, nichts hier ist geraten oder erfunden,
+# nur eine defensive erste Annahme.
+
+HEALTH_LOG_PATH = os.path.join(MEMORY_DIR, "health_log.jsonl")
+HEALTH_LATEST_PATH = os.path.join(MEMORY_DIR, "health_latest.json")
+
+_KNOWN_HEALTH_METRIC_FIELDS = {
+    "sleep_analysis": ("asleep", "value", "qty"),
+    "step_count": ("qty", "value"),
+    "heart_rate": ("Avg", "avg", "value", "qty"),
+    "resting_heart_rate": ("qty", "value"),
+    "active_energy": ("qty", "value"),
+}
+
+
+def add_health_import(payload: dict):
+    os.makedirs(MEMORY_DIR, exist_ok=True)
+    with open(HEALTH_LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"received_at": time.strftime("%Y-%m-%d %H:%M:%S"), "payload": payload}, ensure_ascii=False) + "\n")
+
+    latest = {}
+    try:
+        for m in (payload.get("data") or {}).get("metrics") or []:
+            name = m.get("name")
+            points = m.get("data") or []
+            if not name or not points:
+                continue
+            last_point = points[-1]
+            for field in _KNOWN_HEALTH_METRIC_FIELDS.get(name, ("value", "qty")):
+                if field in last_point:
+                    latest[name] = {"value": last_point[field], "date": last_point.get("date"), "units": m.get("units")}
+                    break
+    except (AttributeError, TypeError):
+        pass
+
+    if not latest:
+        return
+    existing = {}
+    if os.path.exists(HEALTH_LATEST_PATH):
+        try:
+            with open(HEALTH_LATEST_PATH) as f:
+                existing = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+    existing.update(latest)
+    existing["_updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    with open(HEALTH_LATEST_PATH, "w", encoding="utf-8") as f:
+        json.dump(existing, f, ensure_ascii=False, indent=2)
+
+
+def get_latest_health() -> dict:
+    if not os.path.exists(HEALTH_LATEST_PATH):
+        return {}
+    try:
+        with open(HEALTH_LATEST_PATH) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
