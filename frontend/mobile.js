@@ -4,14 +4,25 @@
 // andere Oberflaeche: Text + Push-to-Talk statt Dauer-Zuhoeren (iOS Safari
 // unterstuetzt Dauer-Spracherkennung nicht zuverlaessig, und Dauer-Zuhoeren
 // waere auf einem mobilen Akku ohnehin die falsche Wahl).
+//
+// Redesign 2026-08-11 (Ahmad, Vorbild-Screenshots): Sprechblasen-Chat statt
+// Logzeile, helles Theme (siehe mobile.css), Tab-Leiste Voice/Cockpit,
+// Kamera-Live-Erkennung. Die bestehende Audio-/Barge-in-/Push-Logik bleibt
+// UNVERAENDERT bestehen, nur die UI-beruehrenden Stellen wurden angepasst.
 
 const canvas = document.getElementById('orb-canvas');
 const status = document.getElementById('status');
-const logEl = document.getElementById('mobile-log');
+const chatLog = document.getElementById('chat-log');
+const chatScroll = document.getElementById('chat-scroll');
 const textInput = document.getElementById('mobile-text');
 const sendBtn = document.getElementById('mobile-send');
 const talkBtn = document.getElementById('mobile-talk');
+const hangupBtn = document.getElementById('mobile-hangup');
 const pushBtn = document.getElementById('mobile-enable-push');
+const iconReset = document.getElementById('icon-reset');
+const iconCamera = document.getElementById('icon-camera');
+const iconText = document.getElementById('icon-text');
+const textRow = document.getElementById('text-row');
 
 let ws;
 let audioQueue = [];
@@ -20,6 +31,8 @@ let currentAudio = null;
 let audioCtx = null;
 let analyser = null;
 let audioLevelData = null;
+
+const STATUS_IDLE = 'verbunden';
 
 // EIN wiederverwendetes <audio>-Element fuer die eigentliche Sprachausgabe,
 // nie fuers Primen angefasst (siehe unten warum das wichtig ist).
@@ -73,32 +86,34 @@ function getAudioLevel() {
 }
 
 // ---------------------------------------------------------------------------
-// Orb renderer — jetzt in orb.js (WebGL/Three.js), als <script type="module">
-// vor diesem Skript geladen (siehe mobile.html) und global als window.Orb
-// verfuegbar, exakt gleiche Schnittstelle (setState/start/resize) wie vorher.
-// Echte Audioreaktivitaet (echte Lautstaerke statt nur Zustand) bleibt hier
-// bewusst aus, siehe orb.js-Kommentar: responseAudio darf aus Zuverlaessigkeits-
-// Gruenden nicht an einen Web-Audio-Analyser gehaengt werden.
+// Orb renderer — orb.js (WebGL/Three.js), als <script type="module"> vor
+// diesem Skript geladen, global als window.Orb verfuegbar. Die warme
+// Orange-Palette dort passt bereits fast exakt zum neuen hellen Theme,
+// deshalb bewusst UNVERAENDERT gelassen (kein Neubau noetig).
 // ---------------------------------------------------------------------------
 Orb.start();
+
+// ---------------------------------------------------------------------------
+// Chat-Verlauf — echte Sprechblasen statt einer schlichten Logzeile.
+// ---------------------------------------------------------------------------
+function addLog(who, text) {
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble ' + (who === 'you' ? 'you' : 'jarvis');
+    bubble.textContent = text;
+    chatLog.appendChild(bubble);
+    chatScroll.scrollTop = chatScroll.scrollHeight;
+}
+
 // ---------------------------------------------------------------------------
 // WebSocket — dieselbe Pipeline wie main.js, kein Dauer-Zuhoeren, kein
 // automatischer Begruessungs-Trigger (Ahmad oeffnet die App bewusst, das
 // ersetzt das Doppelklatschen).
 // ---------------------------------------------------------------------------
-function addLog(who, text) {
-    const line = document.createElement('div');
-    line.className = who === 'you' ? 'you' : 'jarvis';
-    line.textContent = (who === 'you' ? 'Du: ' : 'Jarvis: ') + text;
-    logEl.appendChild(line);
-    logEl.scrollTop = logEl.scrollHeight;
-}
-
 function connect() {
     const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${wsProtocol}//${location.host}/ws`);
     ws.onopen = () => {
-        status.textContent = '';
+        status.textContent = STATUS_IDLE;
         Orb.setState('idle');
     };
     ws.onmessage = (event) => {
@@ -109,10 +124,14 @@ function connect() {
                 queueAudio(data.audio, !!data.proactive);
             } else {
                 Orb.setState('idle');
-                status.textContent = '';
+                status.textContent = STATUS_IDLE;
             }
         } else if (data.type === 'status') {
             status.textContent = data.text;
+        } else if (data.type === 'open_camera') {
+            // Jarvis selbst kann die Kamera anstossen (neues open_camera-Tool,
+            // server.py) — gleicher Weg wie ein manueller Tap auf das Kamera-Icon.
+            openCamera();
         }
     };
     ws.onclose = () => {
@@ -153,14 +172,14 @@ function playNext() {
         currentAudio = null;
         stopBargeInWatch();
         Orb.setState('idle');
-        status.textContent = '';
+        status.textContent = STATUS_IDLE;
         return;
     }
     isPlaying = true;
     startBargeInWatch();
     const next = audioQueue.shift();
     Orb.setState(next.proactive ? 'announcing' : 'speaking');
-    status.textContent = next.proactive ? 'Jarvis meldet sich...' : '';
+    status.textContent = next.proactive ? 'Jarvis meldet sich...' : 'Jarvis spricht';
 
     const bytes = Uint8Array.from(atob(next.audio), c => c.charCodeAt(0));
     const blob = new Blob([bytes], { type: 'audio/mpeg' });
@@ -187,18 +206,132 @@ function playNext() {
     });
 }
 
-canvas.addEventListener('click', () => {
-    if (isPlaying) {
-        stopBargeInWatch();
-        if (currentAudio) currentAudio.pause();
-        audioQueue = [];
-        isPlaying = false;
-        Orb.setState('idle');
-        status.textContent = '';
-    }
+function stopEverything() {
+    stopBargeInWatch();
+    if (currentAudio) currentAudio.pause();
+    audioQueue = [];
+    isPlaying = false;
+    Orb.setState('idle');
+    status.textContent = STATUS_IDLE;
+}
+
+canvas.addEventListener('click', () => { if (isPlaying) stopEverything(); });
+hangupBtn.addEventListener('click', () => {
+    stopEverything();
+    if (mediaRecorder && mediaRecorder.state === 'recording') stopRecording();
 });
 
 connect();
+
+// ---------------------------------------------------------------------------
+// Kopfzeilen-Icons — Reset (Neuladen), Kamera (siehe unten), Text-Eingabe
+// ein-/ausblenden.
+// ---------------------------------------------------------------------------
+iconReset.addEventListener('click', () => location.reload());
+iconText.addEventListener('click', () => {
+    textRow.classList.toggle('hidden');
+    iconText.classList.toggle('active');
+    if (!textRow.classList.contains('hidden')) textInput.focus();
+});
+
+// ---------------------------------------------------------------------------
+// Tab-Leiste — Voice / Cockpit (Cockpit eingebettet als iframe auf dieselbe,
+// bereits laufende Seite unter /cockpit).
+// ---------------------------------------------------------------------------
+const tabBtns = document.querySelectorAll('.tab-btn');
+const voiceView = document.getElementById('voice-view');
+const cockpitView = document.getElementById('cockpit-view');
+tabBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+        tabBtns.forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        const tab = btn.dataset.tab;
+        voiceView.classList.toggle('active', tab === 'voice');
+        cockpitView.classList.toggle('active', tab === 'cockpit');
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Kamera-Live-Erkennung (neu, 2026-08-11) — echte Live-Vorschau (rein lokal,
+// kostenlos), alle ~1.75s wird EIN Frame an /analyze-frame geschickt (echte
+// Bildanalyse per Claude Vision, server-seitig, gleiches Modell/Prinzip wie
+// screen_capture.py). Bewusst KEINE echte 30fps-Videoanalyse -- waere weder
+// bezahlbar noch sinnvoll -- fuehlt sich aber durch den kurzen Takt live an.
+// Auto-Stop nach 90s, damit ein vergessenes offenes Kamera-Fenster nicht
+// endlos weiter analysiert und Kosten verursacht.
+// ---------------------------------------------------------------------------
+const cameraOverlay = document.getElementById('camera-overlay');
+const cameraVideo = document.getElementById('camera-video');
+const cameraCanvas = document.getElementById('camera-canvas');
+const cameraResult = document.getElementById('camera-result');
+const cameraCloseBtn = document.getElementById('camera-close');
+
+const CAMERA_ANALYZE_INTERVAL_MS = 1750;
+const CAMERA_AUTO_STOP_MS = 90000;
+let cameraStream = null;
+let cameraTimer = null;
+let cameraStopTimer = null;
+let cameraBusy = false;
+
+async function openCamera() {
+    if (cameraStream) return;
+    try {
+        cameraStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'environment', width: { ideal: 960 } },
+        });
+    } catch (e) {
+        cameraResult.textContent = 'Kein Kamera-Zugriff.';
+        cameraOverlay.classList.remove('hidden');
+        setTimeout(closeCamera, 2000);
+        return;
+    }
+    cameraVideo.srcObject = cameraStream;
+    cameraOverlay.classList.remove('hidden');
+    cameraResult.textContent = 'Schau mal her...';
+    cameraTimer = setInterval(analyzeCameraFrame, CAMERA_ANALYZE_INTERVAL_MS);
+    cameraStopTimer = setTimeout(closeCamera, CAMERA_AUTO_STOP_MS);
+}
+
+function closeCamera() {
+    if (cameraTimer) { clearInterval(cameraTimer); cameraTimer = null; }
+    if (cameraStopTimer) { clearTimeout(cameraStopTimer); cameraStopTimer = null; }
+    if (cameraStream) { cameraStream.getTracks().forEach((t) => t.stop()); cameraStream = null; }
+    cameraOverlay.classList.add('hidden');
+    cameraResult.textContent = '';
+}
+
+async function analyzeCameraFrame() {
+    if (cameraBusy || !cameraStream || cameraVideo.videoWidth === 0) return;
+    cameraBusy = true;
+    try {
+        cameraCanvas.width = cameraVideo.videoWidth;
+        cameraCanvas.height = cameraVideo.videoHeight;
+        cameraCanvas.getContext('2d').drawImage(cameraVideo, 0, 0);
+        const blob = await new Promise((resolve) => cameraCanvas.toBlob(resolve, 'image/jpeg', 0.8));
+        if (!blob) return;
+        const form = new FormData();
+        form.append('frame', blob, 'frame.jpg');
+        const res = await fetch('/analyze-frame', { method: 'POST', body: form });
+        const data = await res.json();
+        if (!cameraStream) return; // in der Zwischenzeit geschlossen
+        if (data.text) cameraResult.textContent = data.text;
+        if (data.audio && data.audio.length > 0) {
+            const bytes = Uint8Array.from(atob(data.audio), (c) => c.charCodeAt(0));
+            const blobAudio = new Blob([bytes], { type: 'audio/mpeg' });
+            const url = URL.createObjectURL(blobAudio);
+            const a = new Audio(url);
+            a.onended = () => URL.revokeObjectURL(url);
+            a.play().catch(() => {});
+        }
+    } catch (e) {
+        // best effort — naechster Takt versucht es erneut
+    } finally {
+        cameraBusy = false;
+    }
+}
+
+iconCamera.addEventListener('click', () => { primeResponseAudio(); openCamera(); });
+cameraCloseBtn.addEventListener('click', closeCamera);
 
 // ---------------------------------------------------------------------------
 // Barge-in (Roadmap Punkt 20) — gleiches Prinzip wie main.js (Mac): waehrend
@@ -286,7 +419,6 @@ function triggerBargeIn() {
     status.textContent = 'Ich hoere...';
     primeResponseAudio();
     startRecording().then(() => {
-        talkBtn.textContent = '🔴 Ich hoere zu...'; // kein Knopf gedrueckt, "Loslassen" waere hier irrefuehrend
         watchForSilenceAndAutoStop();
     });
 }
@@ -363,7 +495,7 @@ async function startRecording() {
     mediaRecorder.onstop = onRecordingStop;
     mediaRecorder.start();
     talkBtn.classList.add('recording');
-    talkBtn.textContent = '🔴 Loslassen zum Senden';
+    status.textContent = 'Du sprichst';
     Orb.setState('listening');
 }
 
@@ -371,11 +503,10 @@ function stopRecording() {
     if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
     if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
     talkBtn.classList.remove('recording');
-    talkBtn.textContent = '🎤 Halten zum Sprechen';
 }
 
 async function onRecordingStop() {
-    if (recordedChunks.length === 0) { Orb.setState('idle'); return; }
+    if (recordedChunks.length === 0) { Orb.setState('idle'); status.textContent = STATUS_IDLE; return; }
     const blob = new Blob(recordedChunks, { type: recordedChunks[0].type || 'audio/webm' });
     status.textContent = 'Transkribiere...';
     Orb.setState('thinking');
@@ -398,6 +529,13 @@ async function onRecordingStop() {
 
 talkBtn.addEventListener('touchstart', (e) => { e.preventDefault(); primeResponseAudio(); startRecording(); }, { passive: false });
 talkBtn.addEventListener('touchend', (e) => { e.preventDefault(); primeResponseAudio(); stopRecording(); }, { passive: false });
+// touchcancel (2026-08-11, echter Vorfall -- Ahmad: "Mikrofon bleibt gedrueckt,
+// versteht mich dann nicht"): iOS/Android brechen eine Touch-Sequenz bei jeder
+// Systemunterbrechung (Scroll-Erkennung, eingehende Benachrichtigung, Geste
+// wird vom OS uebernommen) mit touchcancel ab, NICHT mit touchend. Ohne diesen
+// Handler blieb mediaRecorder im Zustand "recording" und die .recording-Klasse
+// haengen, obwohl real nichts mehr aufgenommen wurde.
+talkBtn.addEventListener('touchcancel', (e) => { e.preventDefault(); stopRecording(); }, { passive: false });
 talkBtn.addEventListener('mousedown', () => { primeResponseAudio(); startRecording(); });
 talkBtn.addEventListener('mouseup', () => { primeResponseAudio(); stopRecording(); });
 talkBtn.addEventListener('mouseleave', () => { if (mediaRecorder && mediaRecorder.state === 'recording') stopRecording(); });

@@ -888,6 +888,18 @@ async def _tool_open_url(args: dict) -> str:
     return f"Geoeffnet: {url}"
 
 
+async def _tool_open_camera(args: dict) -> str:
+    """Die eigentliche Aktion (WS-Nachricht ans Frontend) passiert NICHT hier
+    -- Tools haben bewusst keinen Zugriff auf das aktuelle ws-Objekt/Session
+    (siehe _run_tool). Stattdessen prueft process_message_native NACH dem
+    Tool-Aufruf per Namen ob 'open_camera' dabei war und schickt das Signal
+    von dort (hat ws schon in Scope). Dieser Handler liefert nur den
+    gesprochenen Bestaetigungstext. Nur auf der Handy-Seite sinnvoll (Mac
+    hat keine Kamera-UI in der Web-App) -- auf dem Desktop passiert bei
+    fehlendem Handler auf 'open_camera' im Frontend einfach nichts, kein Fehler."""
+    return "Kamera geoeffnet."
+
+
 async def _tool_calendar_add(args: dict) -> str:
     return await calendar_tools.create_event(
         args["title"], args["date"],
@@ -1703,6 +1715,21 @@ TOOL_REGISTRY: dict = {
         },
         handler=_tool_open_url,
         speak_result=False,
+    ),
+    "open_camera": ToolSpec(
+        schema={
+            "name": "open_camera",
+            "description": (
+                "Oeffnet die Live-Kamera-Erkennung in der Handy-App (nur dort sinnvoll, nicht am "
+                "Mac) -- zeigt ein Live-Kamerabild und beschreibt alle paar Sekunden was zu sehen "
+                "ist (z.B. ein Produkt, eine Verpackung mit Naehrwerten). Nutze das SELBSTSTAENDIG "
+                "wenn Ahmad sagt er will dir etwas zeigen/du sollst schauen was das ist, oder "
+                "explizit die Kamera erwaehnt. Sag vorher kurz 'Ich oeffne die Kamera.'"
+            ),
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        handler=_tool_open_camera,
+        speak_result=True,
     ),
     "calendar_add": ToolSpec(
         schema={
@@ -3183,6 +3210,17 @@ async def process_message_native(session_id: str, user_text: str, ws: WebSocket)
         if not tool_use_blocks:
             return  # (a) einfache Antwort ohne Tool-Aufruf — fertig
 
+        # open_camera (2026-08-11): der Handler selbst hat keinen Zugriff auf
+        # das aktuelle ws-Objekt (Tools sind bewusst session-unabhaengig,
+        # siehe _run_tool), darum hier ein gezielter Seiteneffekt direkt in
+        # der einzigen Stelle die ws schon in Scope hat -- gleiches Prinzip
+        # wie die bestehende SLOW_TOOL_FILLERS-Pruefung ueber Tool-Namen oben.
+        if any(b.name == "open_camera" for b in tool_use_blocks):
+            try:
+                await ws.send_json({"type": "open_camera"})
+            except Exception:
+                pass
+
         # Ergebnisse wie ein Boardroom-Verdict lassen sich nicht in 250 Tokens
         # zusammenfassen, ohne mitten im Satz abzuschneiden (live beobachtet,
         # 2026-08-11) — die naechste Runde (die genau dieses Tool-Ergebnis
@@ -3554,6 +3592,57 @@ async def health_import(payload: dict):
     hier wie ueberall sonst im Projekt die tatsaechliche Grenze."""
     memory.add_health_import(payload)
     return {"received": True}
+
+
+@app.post("/analyze-frame")
+async def analyze_frame(frame: UploadFile = File(...)):
+    """Handy-Kamera-Live-Erkennung (2026-08-11, Ahmad, Vorbild fremder Jarvis-
+    App): EIN Kamera-Frame rein, eine kurze Beschreibung + gesprochene Antwort
+    zurueck. Bewusst KEINE echte 30fps-Videoanalyse (mobile.js schickt hoechstens
+    alle ~1.75s ein Bild) -- fuehlt sich durch den kurzen Takt trotzdem live an.
+    Gleiches Vision-Modell/Prinzip wie screen_capture.describe_screen. Ehrliche
+    Antwort statt Raten wenn das Bild unklar ist (Projekt-Konvention, siehe
+    z.B. browser_extract/READINSIGHTS)."""
+    frame_bytes = await frame.read()
+    b64 = base64.b64encode(frame_bytes).decode("utf-8")
+    media_type = frame.content_type if frame.content_type in (
+        "image/jpeg", "image/png", "image/gif", "image/webp"
+    ) else "image/jpeg"
+    try:
+        response = await ai.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
+                    {"type": "text", "text": (
+                        "Ein Live-Kamera-Bild von Ahmads Handy. Beschreibe in EINEM kurzen, "
+                        "natuerlichen Satz auf Deutsch was im Zentrum des Bildes zu sehen ist "
+                        "(z.B. welches Produkt/Objekt). Falls Text auf dem Bild lesbar ist (z.B. "
+                        "Naehrwerte, Marke, Beschriftung), nenne die wichtigsten lesbaren Angaben "
+                        "kurz mit. Wenn unklar/unscharf: sag ehrlich dass du es nicht sicher "
+                        "erkennst, statt zu raten. Keine Einleitung, direkt die Beschreibung."
+                    )},
+                ],
+            }],
+        )
+        text = "\n".join(b.text for b in response.content if b.type == "text").strip()
+    except Exception as e:
+        print(f"[analyze-frame] Fehler: {e}", flush=True)
+        return {"text": "", "audio": "", "error": str(e)}
+
+    if not text:
+        return {"text": "", "audio": ""}
+
+    try:
+        audio_bytes = await synthesize_speech(text)
+        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8") if audio_bytes else ""
+    except Exception as e:
+        print(f"[analyze-frame] TTS-Fehler: {e}", flush=True)
+        audio_b64 = ""
+
+    return {"text": text, "audio": audio_b64}
 
 
 @app.post("/transcribe")

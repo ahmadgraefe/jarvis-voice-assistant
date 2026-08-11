@@ -1,113 +1,270 @@
-/* Jarvis — Mobile-Companion Styles, ergaenzt style.css (Orb-Basis-Styles) */
+/* Jarvis — Mobile-Companion, Redesign 2026-08-11 (Vorbild: Instagram-Screenshots
+   eines fremden Jarvis-Interfaces). Helles Creme-Theme, bewusst eigenstaendig
+   von style.css (Desktop, dunkel) getrennt -- mobile.html laedt style.css
+   nicht mehr.
+
+   Layout-Fix (der eigentliche Grund fuer den Wackel-Bug): #app-shell ist ein
+   Grid mit FESTEN Zeilen fuer Kopf/Tabbar und einer FLEXIBLEN mittleren
+   Zeile fuer die aktive Ansicht -- der Chat-Verlauf scrollt INNERHALB seines
+   eigenen Bereichs, kann also nie mehr Orb oder Bedienelemente verschieben,
+   egal wie viel Text reinkommt. */
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
 html, body {
-    overflow: auto;
     height: 100%;
+    overflow: hidden;
+    margin: 0;
 }
 
 body {
-    flex-direction: column;
+    background: #FAF3EA;
+    color: #2B231C;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.hidden { display: none !important; }
+
+#app-shell {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
     height: 100vh;
     height: 100dvh;
+    width: 100vw;
 }
 
-#app {
-    width: 100vw;
-    flex: 1 1 auto;
-    min-height: 0;
+/* ===== Kopfzeile ===== */
+#topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: calc(10px + env(safe-area-inset-top)) 18px 10px;
+    background: #FAF3EA;
+    border-bottom: 1px solid rgba(43, 35, 28, 0.08);
+    z-index: 5;
 }
 
-#orb-canvas, #app {
-    height: 100%;
-    width: 100vw;
+#app-title {
+    font-size: 19px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
 }
 
 #status {
-    bottom: 4vh;
+    font-size: 12.5px;
+    color: #9A7B5C;
+    margin-top: 1px;
+    min-height: 15px;
 }
 
-#mobile-controls {
-    flex: 0 0 auto;
-    width: 100%;
-    padding: 10px 14px calc(14px + env(safe-area-inset-bottom));
-    background: linear-gradient(180deg, rgba(3,2,1,0) 0%, #030201 25%);
+#topbar-icons { display: flex; gap: 6px; }
+
+.icon-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: 1px solid rgba(43, 35, 28, 0.12);
+    background: rgba(255, 255, 255, 0.6);
+    color: #6B5A47;
     display: flex;
-    flex-direction: column;
-    gap: 8px;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
 }
 
-#mobile-log {
-    max-height: 22vh;
+.icon-btn svg { width: 18px; height: 18px; }
+.icon-btn.active { background: #FF8A2E; border-color: #FF8A2E; color: #fff; }
+
+/* ===== Tab-Ansichten ===== */
+.tab-view { display: none; min-height: 0; height: 100%; }
+.tab-view.active { display: flex; flex-direction: column; }
+
+#voice-view { padding: 6px 18px calc(14px + env(safe-area-inset-bottom)); gap: 10px; }
+
+#orb-wrap {
+    flex: 1 1 auto;
+    min-height: 120px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+}
+#orb-canvas { width: 100%; height: 100%; display: block; }
+
+/* Chat-Verlauf: EIGENER Scroll-Bereich mit fester Ober-/Untergrenze durch
+   das Grid oben -- waechst nie ueber seinen Platz hinaus, verschiebt darum
+   nie Orb oder Bedienelemente (der eigentliche Fix). */
+#chat-scroll {
+    flex: 0 1 40%;
+    min-height: 0;
     overflow-y: auto;
-    font-size: 13px;
-    color: rgba(255, 210, 160, 0.75);
+    -webkit-overflow-scrolling: touch;
+}
+#chat-log { display: flex; flex-direction: column; gap: 8px; padding: 4px 2px; }
+
+.bubble {
+    max-width: 82%;
+    padding: 10px 14px;
+    border-radius: 18px;
+    font-size: 14.5px;
     line-height: 1.4;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+    word-wrap: break-word;
+}
+.bubble.you {
+    align-self: flex-end;
+    background: #FF8A2E;
+    color: #fff;
+    border-bottom-right-radius: 5px;
+}
+.bubble.jarvis {
+    align-self: flex-start;
+    background: #fff;
+    color: #2B231C;
+    border: 1px solid rgba(43, 35, 28, 0.08);
+    border-bottom-left-radius: 5px;
 }
 
-#mobile-log .you {
-    color: rgba(255, 255, 255, 0.55);
-}
-
-#mobile-input-row {
-    display: flex;
-    gap: 8px;
-}
-
+/* ===== Text-Eingabe (hinter dem Text-Icon versteckt, siehe Plan) ===== */
+#text-row { display: flex; gap: 8px; flex: 0 0 auto; }
 #mobile-text {
     flex: 1;
-    background: rgba(255, 178, 90, 0.08);
-    border: 1px solid rgba(255, 178, 90, 0.25);
+    background: #fff;
+    border: 1px solid rgba(43, 35, 28, 0.12);
     border-radius: 20px;
     padding: 10px 16px;
-    color: #fff;
+    color: #2B231C;
     font-size: 15px;
     outline: none;
 }
-
-#mobile-text::placeholder {
-    color: rgba(255, 210, 160, 0.4);
-}
-
-#mobile-send, #mobile-talk, #mobile-enable-push {
-    background: rgba(255, 150, 40, 0.15);
-    border: 1px solid rgba(255, 178, 90, 0.35);
-    border-radius: 20px;
-    color: #ffd6a0;
-    font-size: 14px;
-    padding: 10px 16px;
-    cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
-    user-select: none;
-}
-
+#mobile-text::placeholder { color: rgba(43, 35, 28, 0.35); }
 #mobile-send {
     flex: 0 0 auto;
-    padding: 10px 18px;
-    font-size: 18px;
+    width: 42px; height: 42px;
     border-radius: 50%;
+    background: #FF8A2E;
+    border: none;
+    color: #fff;
+    font-size: 17px;
+    cursor: pointer;
 }
 
+/* ===== Anruf-Steuerung (Auflegen + Mikrofon) ===== */
+#call-controls {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+}
+#mobile-hangup {
+    padding: 13px 22px;
+    border-radius: 24px;
+    border: 1px solid rgba(43, 35, 28, 0.12);
+    background: #fff;
+    color: #6B5A47;
+    font-size: 14.5px;
+    font-weight: 500;
+    cursor: pointer;
+}
 #mobile-talk {
-    width: 100%;
-    padding: 14px;
-    font-size: 15px;
+    width: 62px; height: 62px;
+    border-radius: 50%;
+    border: none;
+    background: #FF8A2E;
+    color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 6px 18px rgba(255, 138, 46, 0.4);
+    cursor: pointer;
 }
-
+#mobile-talk svg { width: 26px; height: 26px; }
 #mobile-talk.recording {
-    background: rgba(255, 60, 40, 0.25);
-    border-color: rgba(255, 90, 60, 0.6);
-    color: #ffb0a0;
+    background: #E24B3C;
+    box-shadow: 0 6px 18px rgba(226, 75, 60, 0.45);
+    animation: pulse-rec 1.1s ease-in-out infinite;
+}
+@keyframes pulse-rec {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.06); }
 }
 
 #mobile-enable-push {
-    width: 100%;
-    font-size: 13px;
-    opacity: 0.75;
+    flex: 0 0 auto;
+    margin-top: 2px;
+    background: transparent;
+    border: none;
+    color: rgba(43, 35, 28, 0.45);
+    font-size: 12px;
+    padding: 4px;
+    cursor: pointer;
 }
+#mobile-enable-push.granted { display: none; }
 
-#mobile-enable-push.granted {
-    display: none;
+/* ===== Cockpit-Tab (eingebettet) ===== */
+#cockpit-view { padding: 0; }
+#cockpit-frame { width: 100%; height: 100%; border: none; }
+
+/* ===== Untere Tab-Leiste ===== */
+#tabbar {
+    display: flex;
+    border-top: 1px solid rgba(43, 35, 28, 0.08);
+    background: #FAF3EA;
+    padding-bottom: env(safe-area-inset-bottom);
+}
+.tab-btn {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    padding: 8px 0 7px;
+    background: none;
+    border: none;
+    color: rgba(43, 35, 28, 0.4);
+    font-size: 11px;
+    cursor: pointer;
+}
+.tab-btn svg { width: 22px; height: 22px; }
+.tab-btn.active { color: #FF8A2E; }
+
+/* ===== Kamera-Overlay ===== */
+#camera-overlay {
+    position: fixed;
+    inset: 0;
+    background: #000;
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+}
+#camera-video {
+    flex: 1;
+    width: 100%;
+    object-fit: cover;
+    background: #000;
+}
+#camera-result {
+    position: absolute;
+    left: 16px;
+    right: 16px;
+    bottom: calc(28px + env(safe-area-inset-bottom));
+    background: rgba(20, 16, 12, 0.78);
+    color: #fff;
+    padding: 14px 16px;
+    border-radius: 16px;
+    font-size: 14.5px;
+    line-height: 1.4;
+    min-height: 20px;
+    backdrop-filter: blur(6px);
+}
+#camera-close {
+    position: absolute;
+    top: calc(16px + env(safe-area-inset-top));
+    right: 16px;
+    width: 38px; height: 38px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(0, 0, 0, 0.45);
+    color: #fff;
+    font-size: 16px;
+    cursor: pointer;
 }
