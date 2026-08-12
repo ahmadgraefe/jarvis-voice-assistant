@@ -27,6 +27,50 @@ def capture_screen() -> bytes:
     return buf.getvalue()
 
 
+# Grace-Fenster NACH dem osascript-Ende, in dem noch auf die Datei gewartet
+# wird (siehe _wait_for_complete_file). Bewusst kurz: im Normalfall ist die
+# Datei sofort da, das Fenster wird nur im Fehlerfall ueberhaupt ausgereizt.
+# 2 Versuche * (10s osascript + 5s Grace) = 30s, bleibt unter dem read=60s
+# des HTTP-Clients (mac_actuator_client._TIMEOUT), der diesen Aufruf umgibt.
+_SETTLE_TIMEOUT = 5.0
+
+
+async def _wait_for_complete_file(path: str, timeout: float) -> bytes:
+    """Wartet bis die Datei existiert UND ihre Groesse zwei Messungen lang
+    gleich bleibt, dann liest sie.
+
+    Warum ueberhaupt warten, obwohl das AppleScript unten schon
+    'repeat while busy of jarvisTab' macht: Terminal setzt 'busy' erst
+    verzoegert, nachdem 'do script' zurueckkam — die Schleife kann darum
+    sofort durchlaufen, waehrend 'screencapture' noch gar nicht angefangen
+    hat. Vorher wurde direkt danach EINMAL geprueft, ob die Datei existiert,
+    und bei Fehlen sofort abgebrochen; jedes bisschen Langsamkeit von
+    screencapture (z.B. bei schlafendem/aufwachendem Display, genau die
+    Tageszeiten der beobachteten Ausfaelle) wurde so zum harten Fehler,
+    obwohl der Screenshot Millisekunden spaeter da war.
+
+    Die Groessen-Stabilitaet ist der zweite Teil: eine bereits existierende,
+    aber noch nicht fertig geschriebene PNG-Datei war nach der alten Pruefung
+    ('existiert und > 0 Bytes') sofort gut genug und wurde abgeschnitten
+    eingelesen — ein solches Bild kommt bei Claude Vision als teilweise/ganz
+    schwarz an, statt als erkennbarer Fehler."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    last_size = -1
+    while True:
+        size = os.path.getsize(path) if os.path.exists(path) else 0
+        if size > 0 and size == last_size:
+            with open(path, "rb") as f:
+                return f.read()
+        last_size = size
+        if loop.time() >= deadline:
+            raise RuntimeError(
+                "Screenshot ueber Terminal.app kam nicht rechtzeitig an"
+                + ("" if size == 0 else f" (Datei blieb unvollstaendig bei {size} Bytes)")
+            )
+        await asyncio.sleep(0.2)
+
+
 async def _run_terminal_screencapture(timeout: float, reuse_window: bool) -> bytes:
     fd, path = tempfile.mkstemp(suffix=".png")
     os.close(fd)
@@ -89,13 +133,16 @@ async def _run_terminal_screencapture(timeout: float, reuse_window: bool) -> byt
         except Exception:
             pass
 
-    if not (os.path.exists(path) and os.path.getsize(path) > 0):
-        raise RuntimeError("Screenshot ueber Terminal.app kam nicht rechtzeitig an")
-
-    with open(path, "rb") as f:
-        data = f.read()
-    os.remove(path)
-    return data
+    try:
+        return await _wait_for_complete_file(path, _SETTLE_TIMEOUT)
+    finally:
+        # Auch im Fehlerfall aufraeumen: bisher blieb bei jedem Fehlschlag eine
+        # (leere oder halbe) PNG-Datei in /var/folders liegen, weil os.remove
+        # erst nach der Pruefung kam.
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 async def _capture_screen_via_terminal(timeout: float = 10.0) -> bytes:
