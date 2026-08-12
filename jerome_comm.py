@@ -522,7 +522,11 @@ async def _get_account_performance_summary(config: dict, max_chars: int = 3000) 
             continue
         lines = [f"@{account}:"]
         for r in keeps[:5]:
-            lines.append(f"  KEEP: {r.get('video_link')} ({r.get('views')} views, US-audience {r.get('us_audience_pct')})")
+            try:
+                em_text = f"{float(str(r.get('engagement_multiplier')).replace(',', '.')):.1f}x Engagement"
+            except (TypeError, ValueError):
+                em_text = "Engagement noch offen"
+            lines.append(f"  KEEP: {r.get('video_link')} ({r.get('views')} views, {em_text})")
         if cautions:
             lines.append(f"  {len(cautions)} weitere Videos im CAUTION-Bereich (unklar, nicht zwingend empfehlenswert)")
         sections.append("\n".join(lines))

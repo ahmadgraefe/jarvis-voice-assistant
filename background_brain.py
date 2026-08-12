@@ -1471,11 +1471,20 @@ async def trial_reel_pass(config: dict):
                     continue
                 decision = str(row.get("decision") or "").upper()
                 outlier = str(row.get("outlier") or "").upper()
-                us_audience = _parse_de_pct(row.get("us_audience_pct"))
+                engagement_multiplier = _parse_de_pct(row.get("engagement_multiplier"))
                 # Ahmad (2026-08-06): don't wait for a full KEEP — a CAUTION
-                # row with strong US audience (his example: >25%) is still
-                # worth a trial-reel test, not just confirmed KEEP/Outlier winners.
-                eligible = decision == "KEEP" or outlier == "YES" or (us_audience is not None and us_audience >= 0.25)
+                # row with a strong secondary signal is still worth a trial-
+                # reel test, not just confirmed KEEP/Outlier winners. US-
+                # Audience-% wurde 2026-08-12 durch den Engagement Multiplier
+                # ersetzt (Likes+Comments/Views ggue. dem eigenen Account-
+                # Schnitt) -- gleiches Prinzip (ein starkes Zweitsignal reicht
+                # fuer einen Test), aber vollautomatisch aus der Graph API
+                # statt manuell abgelesen. Schwelle 1,5x = spuerbar ueber dem
+                # eigenen Normalniveau, nicht nur knapp drueber.
+                eligible = (
+                    decision == "KEEP" or outlier == "YES"
+                    or (engagement_multiplier is not None and engagement_multiplier >= 1.5)
+                )
                 if not eligible:
                     continue
                 if jerome_comm.already_notified(row["video_link"]):
@@ -2612,13 +2621,16 @@ async def _instagram_insights_for_account(handle: str, acc: dict) -> dict:
         values = insights_result["insights"]
         views = values.get("views") or 0
         comments = values.get("comments")
-        # Likes/Reichweite/Saves/Shares haben keine eigene Sheet-Spalte (siehe
+        likes = values.get("likes")
+        # Reichweite/Saves/Shares haben keine eigene Sheet-Spalte (siehe
         # sheets_tools.py Winner-Tracking-Schema) -- kompakt ins bestehende
         # Notes-Feld statt unaufgefordert neue Spalten in Ahmads/Jeromes
-        # laufende Formeln (Multiplier/Outlier/Decision) einzufuegen.
+        # laufende Formeln einzufuegen. Likes bekommen seit der Winner-
+        # Kriterien-Umstellung (2026-08-12) eine eigene Spalte, weil sie
+        # direkt in die Engagement-Rate-Formel einfliessen (siehe
+        # claude_app_status.md Kernregeln) -- als reiner Notes-Text waeren
+        # sie fuer eine Formel nicht nutzbar.
         note_parts = []
-        if values.get("likes") is not None:
-            note_parts.append(f"{values['likes']} Likes")
         if values.get("reach") is not None:
             note_parts.append(f"{values['reach']} Reichweite")
         if values.get("saved") is not None:
@@ -2632,6 +2644,8 @@ async def _instagram_insights_for_account(handle: str, acc: dict) -> dict:
             fields = {"views": views}
             if comments is not None:
                 fields["comments_total"] = comments
+            if likes is not None:
+                fields["likes"] = likes
             if notes:
                 fields["notes"] = notes
             update_result = await sheets_tools.update_winner_tracking_insights(permalink, fields)
@@ -2640,12 +2654,25 @@ async def _instagram_insights_for_account(handle: str, acc: dict) -> dict:
             entry = {"account": handle, "video_link": permalink, "views": views}
             if comments is not None:
                 entry["comments_total"] = comments
+            if likes is not None:
+                entry["likes"] = likes
             add_result = await sheets_tools.add_winner_tracking_entry(entry)
             _log(f"Neuer Insights-Eintrag @{handle} {permalink}: {add_result}")
             if notes:
                 await sheets_tools.update_winner_tracking_insights(permalink, {"notes": notes})
             _mark_viral_alerted(normalized)
             alerted.add(normalized)
+
+        # Baseline neu berechnen -- fehlte bisher fuer diesen Pfad komplett
+        # (nur der alte Screenshot-Pfad in _check_viral_candidates rief das
+        # auf), wodurch Multiplier/Outlier/Engagement Multiplier/Decision
+        # fuer JEDE ueber die Graph API getrackte Zeile dauerhaft leer
+        # blieben. Bei jedem Lauf neu berechnen (nicht nur beim ersten
+        # Eintrag) haelt beide Baselines aktuell, sobald neue Videos
+        # dazukommen -- ganz ohne dass Ahmad etwas nachtragen muss.
+        baseline_result = await sheets_tools.compute_baseline_avg(handle, permalink)
+        engagement_baseline_result = await sheets_tools.compute_engagement_baseline_avg(handle, permalink)
+        _log(f"Baseline @{handle} {permalink}: {baseline_result} | {engagement_baseline_result}")
         processed += 1
 
     return {"ok": True, "fatal_error": None, "reels_processed": processed}

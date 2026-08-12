@@ -42,11 +42,17 @@ Tabs: Accounts Overview, Instructions, Daily Production List, Winner Tracking, L
 
 ## Kernregeln
 
-- Outlier = Video ≥2x über dem 6-Video-Baseline-Schnitt (6 davor + 6 danach)
-- 20/40-Regel: US-Audience-% <20% = Delete, 20–40% = Caution, >40% = Keep
+- Outlier = Video ≥2x über dem 6-Video-Baseline-Schnitt (6 davor + 6 danach) — unverändert, reines Reach-Signal.
+- **Winner-Entscheidung seit 2026-08-12 auf Reach x Resonanz umgestellt** (ersetzt die alte 20/40-US-Audience-Regel):
+  - Reach-Signal: **Outlier?** (Views ≥2x eigener Baseline, wie oben).
+  - Resonanz-Signal: **Engagement Multiplier** = eigene Engagement Rate `(Likes+Comments)/Views` geteilt durch den 6-Video-Baseline-Schnitt derselben Engagement Rate (gleiches Baseline-Prinzip wie bei Views, nur auf Engagement Rate statt Views).
+  - Decision: **KEEP** wenn Outlier=YES UND Engagement Multiplier ≥1 (überdurchschnittlich fürs eigene Konto). **CAUTION** wenn nur eines von beiden zutrifft. **DELETE** wenn keins zutrifft.
+  - Grund für die Umstellung (Ahmad, 2026-08-12): US-Audience-% kam nur per manueller Eingabe ins Sheet (Instagram zeigt sie nicht öffentlich, siehe Insights-Grenze unten) — das wollte Ahmad nicht mehr von Hand pflegen ("das macht keinen Sinn, das wird mir nur mehr Arbeit machen"), und war bei den meisten Videos ohnehin nahe 100% ausgelastet, also kaum trennscharf. Views, Likes, Comments kommen für Ahmads eigene Accounts komplett automatisch aus der Graph API (`instagram_insights_pass`) — keine manuelle Eingabe mehr nötig für die Winner-Entscheidung.
+  - Migration (2026-08-12, einmalig gegen das echte Sheet gelaufen): alle 104 bestehenden Zeilen bekamen die neuen Spalten (Likes, Engagement Rate, Engagement Baseline, Engagement Multiplier) und eine neu berechnete Baseline/Decision. Vorher hatten nur 7/104 Zeilen überhaupt eine Views-Baseline (Multiplier/Outlier blieben für den Rest leer) — `_instagram_insights_for_account` (background_brain.py) rief die Baseline-Berechnung bis dahin nie auf, echte Lücke, jetzt gefixt: jeder Insights-Lauf berechnet beide Baselines automatisch neu.
+  - "Comments substantive" / "Comment Quality %" (manuelle Spalten) sind seither **nicht mehr Teil der Decision** — Altdaten bleiben stehen, werden aber nicht mehr gepflegt oder gebraucht. "US Audience %" bleibt als historische Spalte im Sheet stehen (21/104 Zeilen hatten Werte), fließt aber nicht mehr in die Decision ein.
 - Trial Reels: von bewährtem Rohmaterial, genau EINE Variable ändern, max. 4/Account/Tag
 - Ziel: 2–3 editierte Reels + 2–4 Trial Reels pro Account/Tag
-- **Ergänzung (Ahmad, 2026-08-06):** nicht erst auf ein volles KEEP warten — auch ein CAUTION-Video mit starker US-Audience (Ahmads Beispiel: >25%) ist schon einen Trial-Reel-Test wert.
+- **Ergänzung (Ahmad, 2026-08-06):** nicht erst auf ein volles KEEP warten — auch ein CAUTION-Video mit starkem Zweitsignal ist schon einen Trial-Reel-Test wert. Seit 2026-08-12 ist das Zweitsignal der Engagement Multiplier (≥1,5) statt US-Audience (`trial_reel_pass` in background_brain.py).
 
 ## Wichtigster Fund (bestätigt über alle 3 Accounts)
 
@@ -76,7 +82,9 @@ Cowgirl: bester Post (Debatten-Hook "if we girls are always right then why do we
 | Was an EINEM TAG auf EINEM Account passiert ist (Rückblick) | Ausschließlich **Jarvis' eigene Aufzeichnungen** (Snapshots, Beitrags-Messungen, Handlungs- und Gesprächsprotokoll, Gemerktes) plus Live-Abgleich, zusammengezogen vom Werkzeug `account_history` (`server.py`, seit 2026-08-12). Ein Aktivitätsprotokoll des Accounts selbst gibt es bei Instagram/TikTok **nicht** — auch nicht für eigene Accounts | Nein, öffentlich |
 | Link-Klicks | https://slt.bio/dashboard/analytics | Ja, meist eingeloggt |
 
-**Aktueller Insights-Workflow (seit 2026-08-07, `insights_inbox_pass` in background_brain.py):** Ahmad liest US-Audience-%/Reach/Views selbst von Instagram Insights ab und trägt sie zusammen mit dem Link DIREKT in den Sheet-Tab "Insights Eingang" ein (eine Zeile pro Video). Jarvis prüft diesen Tab auf eigenem, autonomem Takt und verarbeitet neue Zeilen automatisch — Ahmad muss nichts mehr sagen wie "ich hab's geschickt". Ersetzt vollständig den alten WhatsApp-Screenshot-Workflow.
+**Aktueller Insights-Workflow (seit 2026-08-07, `insights_inbox_pass` in background_brain.py):** Ahmad liest US-Audience-%/Reach/Views selbst von Instagram Insights ab und trägt sie zusammen mit dem Link DIREKT in den Sheet-Tab "Insights Eingang" ein (eine Zeile pro Video). Jarvis prüft diesen Tab auf eigenem, autonomem Takt und verarbeitet neue Zeilen automatisch — Ahmad muss nichts mehr sagen wie "ich hab's geschickt". Ersetzt vollständig den alten WhatsApp-Screenshot-Workflow. **Seit der Winner-Kriterien-Umstellung (2026-08-12) ist dieser Tab optional**, nicht mehr Voraussetzung für eine Winner-Entscheidung — Views/Likes/Comments kommen für Ahmads eigene Accounts automatisch aus der Graph API, siehe Kernregeln oben. Ahmad muss hier nichts mehr eintragen, wenn er nicht will.
+
+**Google-Sheets-Zugang läuft über ein OAuth-Consent-Screen im "Testing"-Status (2026-08-12 live gefunden):** dadurch läuft das Refresh-Token exakt 7 Tage nach der letzten Neuautorisierung ab, unabhängig von Nutzung — unabhängig davon, wie oft Jarvis schreibt. Am 2026-08-12 dadurch mitten in der laufenden Session ausgefallen (`invalid_grant: Token has been expired or revoked`), lokal auf dem Mac neu autorisiert und der frische Token auf den Server kopiert (`sheets_token.json`). Läuft der Consent-Screen weiter im Testing-Status, passiert das in ca. 7 Tagen wieder — **dauerhafte Lösung: Ahmad muss den OAuth-Consent-Screen im Google Cloud Console auf "In Produktion" (Published) stellen**, das kann Jarvis nicht selbst (Google-Login nötig). Bis dahin: erkennbar an genau dieser Fehlermeldung aus `sheets_tools._get_credentials()`, Fix ist derselbe manuelle Reauth-Schritt.
 
 **Veralteter Workflow (bis 2026-08-06, NICHT MEHR VERWENDEN):** Ahmad schickte Link + Insights-Screenshots in den WhatsApp-Chat mit sich selbst, Jarvis las die Zahlen per Vision aus dem Screenshot (`READINSIGHTS`/`_read_insights_from_self_chat`). Wurde ersetzt, weil das Auslesen von WhatsApp-Link-Vorschaukarten und Screenshots unzuverlässig war (Ahmad, 2026-08-07). Falls Jarvis diesen Workflow noch einmal nennt, ist das ein Zeichen für veraltetes Gedächtnis — korrigieren, nicht wiederholen.
 

@@ -359,10 +359,15 @@ async def delete_target_creator_row(handle: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _add_winner_tracking_entry_sync(entry: dict) -> str:
-    """entry: {account, video_link, views, comments_total?, baseline_avg?, us_audience_pct?}.
-    Copies the formula pattern (Multiplier/Outlier/Comment Quality/Decision)
-    from the row above, DE-locale-corrected, translated to the new row —
-    never computes those values itself."""
+    """entry: {account, video_link, views, comments_total?, likes?, baseline_avg?, us_audience_pct?}.
+    Copies the formula pattern (Multiplier/Outlier/Engagement Rate/Engagement
+    Multiplier/Comment Quality/Decision) from the row above, DE-locale-
+    corrected, translated to the new row — never computes those values
+    itself. Winner-Kriterien 2026-08-12 umgestellt (Ahmad: US-Audience-%
+    braucht manuelles Ablesen, das will er nicht mehr) von einem reinen
+    US-Audience-Gate auf Reach (Views-Outlier) x Resonanz (Engagement-Rate-
+    Multiplier aus Likes+Comments/Views) — beides kommt automatisch aus der
+    Graph API, siehe claude_app_status.md Kernregeln."""
     rows = _read_tab_sync(WINNER_TRACKING_TAB)
     if not rows:
         return f"ERROR: Tab '{WINNER_TRACKING_TAB}' konnte nicht gelesen werden."
@@ -372,13 +377,17 @@ def _add_winner_tracking_entry_sync(entry: dict) -> str:
     col_account = _find_column(header, "account")
     col_link = _find_column(header, "video link")
     col_views = _find_column(header, "views")
-    col_baseline = _find_column(header, "baseline")
+    col_baseline = _find_column(header, "baseline avg")
     col_multiplier = _find_column(header, "multiplier")
     col_outlier = _find_column(header, "outlier")
     col_comments_total = _find_column(header, "comments\ntotal", "comments total")
     col_comment_quality = _find_column(header, "quality")
     col_us_audience = _find_column(header, "us audience")
     col_decision = _find_column(header, "decision")
+    col_likes = _find_column(header, "likes")
+    col_engagement_rate = _find_column(header, "engagement rate")
+    col_engagement_baseline = _find_column(header, "engagement baseline")
+    col_engagement_multiplier = _find_column(header, "engagement multiplier")
 
     if any(c is None for c in (col_date, col_account, col_link, col_views)):
         return "ERROR: Erwartete Spalten (Date/Account/Video Link/Views) nicht gefunden."
@@ -402,6 +411,8 @@ def _add_winner_tracking_entry_sync(entry: dict) -> str:
         values[col_comments_total] = entry["comments_total"]
     if entry.get("us_audience_pct") is not None and col_us_audience is not None:
         values[col_us_audience] = entry["us_audience_pct"]
+    if entry.get("likes") is not None and col_likes is not None:
+        values[col_likes] = entry["likes"]
 
     # Copy formulas from the template row (last existing data row, or row 2
     # if this is the very first entry) — MUST read with valueRenderOption=
@@ -409,7 +420,8 @@ def _add_winner_tracking_entry_sync(entry: dict) -> str:
     # which don't start with '=' and would silently skip every column.
     formula_rows = _read_tab_formulas_sync(WINNER_TRACKING_TAB)
     template_row = formula_rows[template_row_idx - 1] if template_row_idx - 1 < len(formula_rows) else []
-    for col in (col_multiplier, col_outlier, col_comment_quality, col_decision):
+    for col in (col_multiplier, col_outlier, col_comment_quality, col_decision,
+                col_engagement_rate, col_engagement_multiplier):
         if col is None:
             continue
         template_formula = _cell(template_row, col)
@@ -424,14 +436,7 @@ def _add_winner_tracking_entry_sync(entry: dict) -> str:
             values[col] = _shift_formula_row(str(template_formula), template_row_idx, new_row_1based)
 
     _append_row_sync(WINNER_TRACKING_TAB, new_row_1based, values, num_cols)
-
-    missing = []
-    if entry.get("baseline_avg") is None:
-        missing.append("Baseline Avg")
-    if entry.get("us_audience_pct") is None:
-        missing.append("US Audience % (aus Instagram Insights)")
-    note = f" Fehlt noch: {', '.join(missing)}." if missing else ""
-    return f"Neuer Eintrag fuer @{entry['account']} in Winner Tracking (Zeile {new_row_1based}).{note}"
+    return f"Neuer Eintrag fuer @{entry['account']} in Winner Tracking (Zeile {new_row_1based})."
 
 
 async def add_winner_tracking_entry(entry: dict) -> str:
@@ -447,8 +452,9 @@ def _update_winner_tracking_insights_sync(video_link: str, fields: dict) -> str:
     col_link = _find_column(header, "video link")
     col_views = _find_column(header, "views")
     col_us_audience = _find_column(header, "us audience")
-    col_baseline = _find_column(header, "baseline")
+    col_baseline = _find_column(header, "baseline avg")
     col_comments_total = _find_column(header, "comments\ntotal", "comments total")
+    col_likes = _find_column(header, "likes")
     col_notes = _find_column(header, "notes")
 
     target_id = instagram_tools.normalize_video_url(video_link)
@@ -464,6 +470,8 @@ def _update_winner_tracking_insights_sync(video_link: str, fields: dict) -> str:
                 values[col_baseline] = fields["baseline_avg"]
             if fields.get("comments_total") is not None and col_comments_total is not None:
                 values[col_comments_total] = fields["comments_total"]
+            if fields.get("likes") is not None and col_likes is not None:
+                values[col_likes] = fields["likes"]
             if fields.get("notes") and col_notes is not None:
                 existing = _cell(row, col_notes)
                 values[col_notes] = f"{existing} | {fields['notes']}" if existing else fields["notes"]
@@ -480,30 +488,40 @@ async def update_winner_tracking_insights(video_link: str, fields: dict) -> str:
     return await loop.run_in_executor(None, _update_winner_tracking_insights_sync, video_link, fields)
 
 
-def _compute_baseline_avg_sync(account: str, video_link: str) -> str:
+def _compute_windowed_baseline_sync(account: str, video_link: str, value_fragments: tuple,
+                                     baseline_fragments: tuple, metric_label: str, round_fn=round) -> str:
+    """Shared windowing logic behind both Views- and Engagement-Baseline: the
+    plain average of the account's own 6 surrounding videos (before+after),
+    written as a PLAIN VALUE, not a sheet formula — Sheets has no native
+    'average of the 6 nearest same-account rows' function, so this stays
+    Python-side. round_fn differs per metric: Views are whole numbers,
+    Engagement Rate is a small fraction (e.g. 0,032) that rounding to an
+    int would flatten to 0."""
     rows = _read_tab_sync(WINNER_TRACKING_TAB)
     if not rows:
         return f"ERROR: Tab '{WINNER_TRACKING_TAB}' konnte nicht gelesen werden."
     header = rows[0]
     col_account = _find_column(header, "account")
     col_link = _find_column(header, "video link")
-    col_views = _find_column(header, "views")
-    col_baseline = _find_column(header, "baseline")
+    col_value = _find_column(header, *value_fragments)
+    col_baseline = _find_column(header, *baseline_fragments)
+    if col_value is None or col_baseline is None:
+        return f"ERROR: Spalten fuer {metric_label}-Baseline nicht gefunden."
 
     target_id = instagram_tools.normalize_video_url(video_link)
-    account_rows = []  # (1based_row_idx, views)
+    account_rows = []  # (1based_row_idx, value)
     target_idx = None
     for i, row in enumerate(rows[1:], start=2):
         acc = _cell(row, col_account)
         link = _cell(row, col_link)
         if not link or not acc or str(acc).strip().lower() != account.strip().lower():
             continue
-        views_raw = _cell(row, col_views)
+        raw = _cell(row, col_value)
         try:
-            views = float(str(views_raw).replace(",", ".")) if views_raw is not None else None
+            value = float(str(raw).replace(",", ".")) if raw is not None else None
         except ValueError:
-            views = None
-        account_rows.append((i, views))
+            value = None
+        account_rows.append((i, value))
         if instagram_tools.normalize_video_url(str(link)) == target_id:
             target_idx = len(account_rows) - 1
 
@@ -515,17 +533,35 @@ def _compute_baseline_avg_sync(account: str, video_link: str) -> str:
     sample = before + after
 
     if len(sample) < 2:
-        return f"Zu wenig Vergleichsdaten fuer @{account} ({len(sample)} Video(s)) — Baseline noch nicht gesetzt."
+        return f"Zu wenig Vergleichsdaten fuer @{account} ({len(sample)} Video(s)) — {metric_label}-Baseline noch nicht gesetzt."
 
-    baseline_avg = round(sum(sample) / len(sample))
+    baseline_avg = round_fn(sum(sample) / len(sample))
     target_row = account_rows[target_idx][0]
     _write_row_sync(WINNER_TRACKING_TAB, target_row, {col_baseline: baseline_avg})
-    return f"Baseline Avg fuer @{account} auf {baseline_avg} gesetzt ({len(sample)} Vergleichsvideos, Zeile {target_row})."
+    return f"{metric_label}-Baseline fuer @{account} auf {baseline_avg} gesetzt ({len(sample)} Vergleichsvideos, Zeile {target_row})."
+
+
+def _compute_baseline_avg_sync(account: str, video_link: str) -> str:
+    return _compute_windowed_baseline_sync(
+        account, video_link, ("views",), ("baseline avg",), "Views", round_fn=round,
+    )
 
 
 async def compute_baseline_avg(account: str, video_link: str) -> str:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _compute_baseline_avg_sync, account, video_link)
+
+
+def _compute_engagement_baseline_avg_sync(account: str, video_link: str) -> str:
+    return _compute_windowed_baseline_sync(
+        account, video_link, ("engagement rate",), ("engagement baseline",), "Engagement",
+        round_fn=lambda v: round(v, 4),
+    )
+
+
+async def compute_engagement_baseline_avg(account: str, video_link: str) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _compute_engagement_baseline_avg_sync, account, video_link)
 
 
 def _compute_account_avg_views_sync(account: str, sample_size: int = 6):
@@ -573,6 +609,7 @@ def _read_winner_tracking_sync(account: str = None, limit: int = 10) -> list:
     col_outlier = _find_column(header, "outlier")
     col_decision = _find_column(header, "decision")
     col_us_audience = _find_column(header, "us audience")
+    col_engagement_multiplier = _find_column(header, "engagement multiplier")
 
     result = []
     for row in rows[1:]:
@@ -586,6 +623,7 @@ def _read_winner_tracking_sync(account: str = None, limit: int = 10) -> list:
             "account": acc, "video_link": link,
             "views": _cell(row, col_views), "outlier": _cell(row, col_outlier),
             "decision": _cell(row, col_decision), "us_audience_pct": _cell(row, col_us_audience),
+            "engagement_multiplier": _cell(row, col_engagement_multiplier),
         })
     return result[-limit:]
 
