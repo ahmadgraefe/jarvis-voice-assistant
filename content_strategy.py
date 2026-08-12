@@ -281,7 +281,7 @@ async def _compose_and_send_brief(anthropic_client, prompt_text: str, log_label:
     try:
         response = await anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=900,
+            max_tokens=1600,
             messages=[{"role": "user", "content": prompt_text}],
         )
     except Exception as e:
@@ -369,6 +369,10 @@ async def send_daily_content_brief(anthropic_client) -> str:
         "mehr Auftraege, schwache oder datenlose Accounts weniger oder in dem Zyklus auch mal "
         "keinen. Lieber insgesamt unter 8-10 bleiben als Videos oder Links erfinden, die die "
         "echten Daten nicht hergeben.\n\n"
+        "WICHTIG ZUM FORMAT: denk die Verteilung/Auswahl STILL fuer dich durch, schreib sie "
+        "NICHT als eigenen Analyse-Abschnitt aus. Deine Antwort beginnt UNMITTELBAR mit der "
+        "Zeile '===WHATSAPP===' — keine Ueberschrift, keine Zusammenfassung, kein Vorspann "
+        "davor.\n\n"
         "1. TRIAL REELS: aus einem guten Winner-Video EINE konkrete VARIANTE ableiten, kein "
         "neues Konzept. GENAU EINE Variable aendern (z.B. anderes Outfit, anderer Ort/Setting, "
         "anderer Einstiegssatz/Hook-Wortlaut, anderer Sound) — der Rest bleibt wie im bewaehrten "
