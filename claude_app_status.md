@@ -1,6 +1,6 @@
 # Luna Vale — Status (aus Claude Desktop App übernommen)
 
-Stand: 2026-08-12 (Handlungsprotokoll fuer eigene Aktionen — `own_action_check`; Rollenverteilung-Zeile zu "keine Geraetesteuerung" korrigiert. Davor 2026-08-11: Grosser Jarvis-Audit — Kernregeln, Jerome-Kommunikation, Feste-Grenzen-Enforcement; siehe jeweilige Abschnitte)
+Stand: 2026-08-12 (Einzelnes Reel per Link analysierbar — `reel_analysis`; Handlungsprotokoll fuer eigene Aktionen — `own_action_check`; Rollenverteilung-Zeile zu "keine Geraetesteuerung" korrigiert. Davor 2026-08-11: Grosser Jarvis-Audit — Kernregeln, Jerome-Kommunikation, Feste-Grenzen-Enforcement; siehe jeweilige Abschnitte)
 
 ## Worum es geht
 
@@ -71,6 +71,7 @@ Cowgirl: bester Post (Debatten-Hook "if we girls are always right then why do we
 | Likes, Kommentare, Caption | Video einzeln öffnen | Nein, öffentlich |
 | US-Audience-%, Reach, Views | Sheet-Tab **"Insights Eingang"** (Spalten: Link, US Audience %, Reach, Views, Status) | Ahmad braucht Insights-Zugriff, Jarvis nicht |
 | Trial-Reel-Stand pro Account (offene/gepostete Welle, Link, 2x-Ergebnis) | Sheet-Tab **"Trial Reel Waves"** + Live-Blick aufs öffentliche Profil, zusammengezogen vom Werkzeug `trial_reel_check` (`server.py`, seit 2026-08-12) | Nein, öffentlich |
+| Struktur + öffentliche Zahlen EINES Reels (per Link) | Video selbst, mehrere Frames über die Laufzeit + öffentliche Post-Ansicht, zusammengezogen mit dem Sheet-Stand vom Werkzeug `reel_analysis` (`server.py`, seit 2026-08-12) | Nein, öffentlich |
 | Link-Klicks | https://slt.bio/dashboard/analytics | Ja, meist eingeloggt |
 
 **Aktueller Insights-Workflow (seit 2026-08-07, `insights_inbox_pass` in background_brain.py):** Ahmad liest US-Audience-%/Reach/Views selbst von Instagram Insights ab und trägt sie zusammen mit dem Link DIREKT in den Sheet-Tab "Insights Eingang" ein (eine Zeile pro Video). Jarvis prüft diesen Tab auf eigenem, autonomem Takt und verarbeitet neue Zeilen automatisch — Ahmad muss nichts mehr sagen wie "ich hab's geschickt". Ersetzt vollständig den alten WhatsApp-Screenshot-Workflow.
@@ -84,6 +85,8 @@ Fehlende Zahlen: zuerst im Sheet nachschauen, sonst Ahmad fragen — nicht raten
 Trial Reels: exakt 3h nach Posten. Hauptfeed-Posts: ~3h (früher Indikator) UND ~24h (zählt für Winner-Tracking-Entscheidung).
 
 **Insights-Screenshots kann Jarvis nicht liefern (klargestellt 2026-08-12, nach Ahmads Frage nach einem Trial Reel auf @lunaxvale):** Reach, US-Audience-% und Interaktionsraten zeigt Instagram nur *innerhalb* des Accounts, in dem gepostet wurde. Jarvis' Instagram-Session gehört Ahmads privatem Ansehen-Account (`instagram_username` in config.json), und auf den echten Posting-Accounts wird bewusst nicht eingeloggt/getippt (feste Grenzen 2 und 3 unten). Was Jarvis stattdessen liefert — `trial_reel_check` in `server.py`: den Link (aus "Trial Reel Waves" plus Live-Abgleich mit den neuesten Beiträgen des öffentlichen Profils), die öffentlich sichtbaren Zahlen (Views/Likes/Kommentare) samt Screenshot der **öffentlichen Post-Ansicht** (`memory/post_screenshots/`, ausdrücklich kein Insights-Panel), und die Insights-Zahlen, die schon im Sheet stehen. Öffentlich ist ein Trial Reel übrigens nicht als solcher erkennbar — die Zuordnung Reel → Welle kommt allein aus dem Sheet. Geschätzte Insights-Werte gibt es nicht.
+
+**Ein einzelnes Reel per Link analysieren (2026-08-12, nachdem Ahmad genau das wollte und der Versuch über `video_analysis` abbrach):** Werkzeug `reel_analysis` in `server.py`. `video_analysis` nimmt einen **Account**-Namen und läuft über dessen letzte ~6 Videos — ein Link ist dort kein gültiger Parameter, deshalb der Abbruch. Die eigentliche Fähigkeit (`instagram_tools.analyze_video_deep()`: mehrere Frames über die Laufzeit → Hook/Transition/Pacing) existierte, war aber nur aus `background_brain.py` aufrufbar und aus einem Gespräch heraus gar nicht erreichbar. `reel_analysis` nimmt einen Reel-/Post-Link (eigene wie fremde Accounts) und liefert: die Struktur des Videos, die öffentlichen Zahlen samt Screenshot der öffentlichen Post-Ansicht, und alle Insights-Zahlen, die zu dem Link schon in "Insights Eingang" / Winner Tracking / "Trial Reel Waves" stehen. Die Insights-Grenze oben gilt unverändert — auch dieses Werkzeug liefert **kein** Insights-Panel, sondern benennt die Grenze im Ergebnis. Abgrenzung: Account-Überblick → `video_analysis`, Trial-Reel-Stand eines eigenen Accounts → `trial_reel_check`, ein konkretes Reel → `reel_analysis`.
 
 ## Jerome-Kommunikation (WhatsApp)
 

@@ -2264,6 +2264,196 @@ async def _tool_trial_reel_check(args: dict) -> str:
     return "\n".join(lines)
 
 
+# --- EIN konkretes Reel per Link analysieren ---------------------------------
+# Ahmad, 2026-08-12: er wollte, dass ich "das Instagram-Reel analysiere und die
+# Insights-Screenshots bereitstelle" — und beides ging nicht. Grund war NICHT,
+# dass die Faehigkeit fehlte, sondern dass sie ueber kein aufrufbares Werkzeug
+# erreichbar war:
+#   - video_analysis nimmt einen ACCOUNT-Namen und laeuft ueber dessen letzte
+#     ~6 Videos (teuer, und beim Versuch, damit EIN Reel zu analysieren, brach
+#     der Durchlauf ab — ein Link ist dort schlicht kein gueltiger Parameter).
+#   - instagram_tools.analyze_video_deep() macht genau das Gewuenschte
+#     (mehrere Frames ueber die Zeit -> Hook/Transition/Pacing), war aber nur
+#     aus background_brain.py aufrufbar, nie aus einem Gespraech.
+#   - trial_reel_check beantwortet die Wellen-/Link-Frage EINES eigenen
+#     Accounts, nicht "analysier mir mal dieses Reel hier".
+#
+# Dieses Werkzeug schliesst genau diese Luecke: ein Link rein, und heraus
+# kommen (1) die strukturelle Frame-Analyse des Videos selbst, (2) die
+# oeffentlichen Zahlen samt gespeichertem Screenshot der oeffentlichen
+# Post-Ansicht, (3) alle Insights-Zahlen, die zu diesem Link schon irgendwo im
+# Sheet stehen (Insights Eingang / Winner Tracking / Trial Reel Waves).
+#
+# Was es BEWUSST NICHT liefert: einen echten Insights-Panel-Screenshot
+# (Reach, US-Audience-%). Den zeigt Instagram nur innerhalb des Accounts, in
+# dem gepostet wurde — dort wird bewusst nicht eingeloggt (feste Grenzen 2+3
+# in claude_app_status.md). Diese Grenze steht im Ergebnis oben und nicht als
+# Fussnote, damit sie beim Weitergeben nicht untergeht. Geschaetzte
+# Insights-Werte gibt es nicht.
+#
+# Rein lesend (oeffentliche Instagram-Seite ansehen, Screenshot lokal ablegen,
+# Sheet lesen) — nichts davon ist nach aussen sichtbar, deshalb bewusst KEIN
+# Bestaetigungs-Gate.
+
+_REEL_ANALYSIS_WINNER_ROWS = 200  # gross genug, dass "die letzten N" den Link nicht abschneidet
+
+
+async def _tool_reel_analysis(args: dict) -> str:
+    raw_url = (args.get("url") or "").strip()
+    if not raw_url:
+        return (
+            "ERROR: Kein Link angegeben. Ich brauche den konkreten Reel-/Post-Link "
+            "(instagram.com/reel/... oder /p/...). Fuer 'die letzten Videos von @handle' ist "
+            "video_analysis das richtige Werkzeug, fuer den Trial-Reel-Stand eines eigenen "
+            "Accounts trial_reel_check."
+        )
+    url = instagram_tools.canonical_post_url(raw_url)
+    if not url:
+        return (
+            f"ERROR: '{raw_url}' ist kein Instagram-Post-/Reel-Link. Ich analysiere hier nichts "
+            "auf Verdacht — schick mir den Link aus dem Teilen-Menue (instagram.com/reel/... "
+            "oder instagram.com/p/...)."
+        )
+
+    now = datetime.now(ZoneInfo("Europe/Berlin")).strftime("%d.%m.%Y %H:%M")
+    lines = [f"Reel-Analyse fuer {url} (Stand {now}):"]
+    lines.append(
+        "GRENZE — echten Insights-Screenshot kann ich nicht liefern: Reach, US-Audience-% und "
+        "Interaktionsraten zeigt Instagram nur INNERHALB des Accounts, in dem gepostet wurde. "
+        f"Mein Instagram-Login ist @{config.get('instagram_username') or '?'} (Ahmads privater "
+        "Ansehen-Account), auf den Posting-Accounts wird bewusst nicht eingeloggt (Ban-Risiko, "
+        "feste Grenze in claude_app_status.md). Der Screenshot unten ist die OEFFENTLICHE "
+        "Post-Ansicht, nicht das Insights-Panel. Insights-Zahlen nenne ich nur, wenn sie unten "
+        "wirklich im Ergebnis stehen — geschaetzt wird hier nichts."
+    )
+
+    # 1) Das Video selbst: mehrere Frames ueber die Zeit -> Struktur
+    if args.get("skip_video") is True:
+        lines.append(
+            "Video-Struktur: uebersprungen (skip_video=true) — Hook/Transition/Pacing habe ich "
+            "mir also NICHT angesehen."
+        )
+    else:
+        try:
+            deep = await instagram_tools.analyze_video_deep(url, ai)
+        except Exception as e:
+            deep = {"error": f"{e.__class__.__name__}: {e}"}
+        if deep.get("error"):
+            lines.append(
+                f"- Video-Struktur nicht analysierbar: {_trial_reel_short_error(deep['error'])} — "
+                "ueber Hook, Schnitt oder Tempo sage ich damit nichts. Haeufigste Ursachen: das "
+                "Reel ist geloescht/privat, oder Instagram hat die Seite als Login-Wand "
+                "ausgeliefert."
+            )
+        else:
+            lines.append("Video-Struktur (mehrere Frames ueber die Laufzeit, per Vision gelesen):")
+            for key, label in (
+                ("hook_timing", "Hook (erste 1-2 Sekunden)"),
+                ("transition", "Transition/Szenenwechsel"),
+                ("pacing", "Tempo/Schnitt"),
+                ("structure_summary", "Strukturelles Fazit"),
+            ):
+                if deep.get(key):
+                    lines.append(f"- {label}: {deep[key]}")
+            missing = [k for k in ("hook_timing", "transition", "pacing", "structure_summary")
+                       if not deep.get(k)]
+            if missing:
+                lines.append(
+                    f"- Nicht beantwortet aus der Frame-Analyse: {', '.join(missing)} — diese "
+                    "Punkte bleiben offen, statt sie plausibel zu fuellen."
+                )
+
+    # 2) Oeffentliche Zahlen + Screenshot der oeffentlichen Ansicht
+    try:
+        stats = await instagram_tools.check_post_public_stats(url, ai, save_screenshot=True)
+    except Exception as e:
+        stats = {"error": f"{e.__class__.__name__}: {e}"}
+    if stats.get("raw"):
+        lines.append(f"Oeffentliche Zahlen: {stats['raw']} (Stand {stats.get('timestamp') or now})")
+    if stats.get("error"):
+        lines.append(
+            f"- Oeffentliche Zahlen nicht gelesen: {_trial_reel_short_error(stats['error'])} — "
+            "hier wird nichts geschaetzt."
+        )
+    if stats.get("screenshot_path"):
+        lines.append(
+            f"- Screenshot: {stats['screenshot_path']} — OEFFENTLICHE Post-Ansicht "
+            "(Views/Likes/Kommentare), ausdruecklich KEIN Insights-Panel. Sag das genau so, wenn "
+            "du den Screenshot weitergibst."
+        )
+    elif stats.get("screenshot_error"):
+        lines.append(
+            f"- Screenshot nicht gespeichert: {_trial_reel_short_error(stats['screenshot_error'])}."
+        )
+    elif not stats.get("error"):
+        lines.append("- Kein Screenshot entstanden.")
+
+    # 3) Insights-Zahlen, die zu genau diesem Link schon im Sheet stehen
+    target_id = instagram_tools.normalize_video_url(url)
+    found_any = False
+
+    try:
+        pending = await sheets_tools.read_pending_insights_inbox()
+        hits = [p for p in pending if instagram_tools.normalize_video_url(p["link"]) == target_id]
+        for p in hits:
+            found_any = True
+            lines.append(
+                f"Insights im Tab 'Insights Eingang' (von Ahmad eingetragen, noch unverarbeitet, "
+                f"Zeile {p['row']}): US-Audience={p.get('us_audience_raw') or 'leer'}, "
+                f"Reach={p.get('reach_raw') or 'leer'}, Views={p.get('views_raw') or 'leer'} — "
+                "wird beim naechsten Hintergrund-Durchlauf verarbeitet."
+            )
+    except Exception as e:
+        lines.append(f"- Tab 'Insights Eingang' nicht lesbar ({e.__class__.__name__}: {e}).")
+
+    try:
+        tracked = await sheets_tools.read_winner_tracking(limit=_REEL_ANALYSIS_WINNER_ROWS)
+        errors = [r["error"] for r in tracked if r.get("error")]
+        if errors:
+            lines.append(f"- Winner Tracking nicht lesbar ({errors[0]}).")
+        hits = [
+            r for r in tracked
+            if not r.get("error") and r.get("video_link")
+            and instagram_tools.normalize_video_url(str(r["video_link"])) == target_id
+        ]
+        for r in hits:
+            found_any = True
+            lines.append(
+                f"Schon im Winner Tracking (Account {r.get('account') or 'leer'}): "
+                f"Views={r.get('views') or 'leer'}, US-Audience={r.get('us_audience_pct') or 'leer'}, "
+                f"Outlier={r.get('outlier') or 'leer'}, Decision={r.get('decision') or 'leer'}"
+            )
+    except Exception as e:
+        lines.append(f"- Winner Tracking nicht lesbar ({e.__class__.__name__}: {e}).")
+
+    try:
+        waves = await sheets_tools.read_trial_reel_waves()
+        hits = [
+            w for w in waves
+            if w.get("video_link")
+            and instagram_tools.normalize_video_url(str(w["video_link"])) == target_id
+        ]
+        for w in hits:
+            found_any = True
+            lines.append(
+                f"Dieses Reel ist ein dokumentiertes Trial Reel (Account {w.get('account')}): "
+                f"{_trial_reel_describe_wave(w)}"
+            )
+    except Exception as e:
+        lines.append(f"- Tab 'Trial Reel Waves' nicht lesbar ({e.__class__.__name__}: {e}).")
+
+    if not found_any:
+        lines.append(
+            "Zu diesem Link stehen bei mir noch keine Insights-Zahlen: weder im Tab 'Insights "
+            "Eingang', noch im Winner Tracking, noch in einer Trial-Reel-Welle. Weg dorthin: "
+            "Insights in Instagram ablesen (bei Trial Reels exakt 3 Stunden nach dem Posten) und "
+            "Link + US-Audience-% + Reach + Views in den Sheet-Tab 'Insights Eingang' eintragen, "
+            "eine Zeile pro Video. Den Rest (Auswertung, 2x-Regel, Jerome-Briefing) mache ich auf "
+            "eigenem Takt."
+        )
+    return "\n".join(lines)
+
+
 # --- Eigenes Handlungsprotokoll: "war das ich?" ------------------------------
 # Ahmad, 2026-08-12: er fragte, ob JARVIS SELBST am Tag davor ein Trial Reel
 # gepostet hatte oder Jerome. Darauf gab es keine belegte Antwort — nicht weil
@@ -3736,6 +3926,52 @@ TOOL_REGISTRY: dict = {
         slow=True,
         verbose_reply=True,
     ),
+    "reel_analysis": ToolSpec(
+        schema={
+            "name": "reel_analysis",
+            "description": (
+                "EIN konkretes Instagram-Reel/Post per LINK analysieren — nutzen bei 'analysier "
+                "mir mal dieses Reel', 'was macht das Video gut?', 'wie laeuft dieses Reel?', "
+                "'schick mir die Zahlen/den Screenshot dazu'. Liefert drei Dinge zu genau diesem "
+                "Link: (1) die STRUKTUR des Videos selbst aus mehreren Frames ueber die Laufzeit "
+                "(Hook in den ersten Sekunden, Transition/Szenenwechsel, Tempo), (2) die "
+                "oeffentlich sichtbaren Zahlen (Views/Likes/Kommentare) samt gespeichertem "
+                "Screenshot der OEFFENTLICHEN Post-Ansicht, (3) alle Insights-Zahlen, die zu dem "
+                "Link schon im Sheet stehen (Tab 'Insights Eingang', Winner Tracking, Trial Reel "
+                "Waves). Funktioniert fuer eigene UND fremde Accounts. Abgrenzung: fuer 'die "
+                "letzten Videos von @handle' ist video_analysis richtig, fuer den Trial-Reel-Stand "
+                "eines eigenen Accounts trial_reel_check. WICHTIG: einen echten "
+                "INSIGHTS-Screenshot (Reach, US-Audience-%) kann das Werkzeug NICHT liefern — den "
+                "sieht nur wer im Posting-Account eingeloggt ist, und das passiert bewusst nicht. "
+                "Gib die Grenzen und Fehlermeldungen aus dem Ergebnis unveraendert weiter und "
+                "nenne NIEMALS selbst eine Zahl oder eine Struktur-Einschaetzung, die nicht im "
+                "Ergebnis steht. Sag vorher einen kurzen Satz wie 'Ich schaue mir das Reel an.' "
+                "Dauert ein bis zwei Minuten."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Der Reel-/Post-Link (instagram.com/reel/... oder /p/...).",
+                    },
+                    "skip_video": {
+                        "type": "boolean",
+                        "description": (
+                            "Optional. true = nur Zahlen, Screenshot und Sheet-Stand, ohne die "
+                            "teure Frame-Analyse des Videos. Nur setzen, wenn es ausdruecklich "
+                            "schnell gehen soll."
+                        ),
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+        handler=_tool_reel_analysis,
+        speak_result=True,
+        slow=True,
+        verbose_reply=True,
+    ),
     "own_action_check": ToolSpec(
         schema={
             "name": "own_action_check",
@@ -4082,6 +4318,7 @@ SLOW_TOOL_FILLERS = {
     "flight_search": "Ich hole die aktuellen Flugpreise, einen Moment.",
     "video_analysis": "Ich schaue mir die letzten Videos an.",
     "trial_reel_check": "Ich schaue nach, was zu dem Trial Reel wirklich vorliegt.",
+    "reel_analysis": "Ich schaue mir das Reel an, das dauert einen Moment.",
     "gmail_check": "Ich schaue kurz ins Postfach.",
     "whatsapp_check": "Ich schaue kurz bei WhatsApp nach.",
     "read_chat": "Ich schaue kurz im Chat nach.",
