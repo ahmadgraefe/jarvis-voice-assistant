@@ -15,6 +15,8 @@ import json
 import os
 import re
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from playwright.async_api import async_playwright
 
@@ -875,6 +877,61 @@ async def get_recent_post_links(handle: str, limit: int = 4) -> dict:
                 await page.close()
             except Exception:
                 pass
+
+
+async def get_post_published_at(url: str) -> dict:
+    """WANN wurde dieser Post/Reel veroeffentlicht? Aus dem <time>-Element der
+    Post-Seite, ohne Vision und ohne Screenshot.
+
+    Instagram rendert den Zeitpunkt maschinenlesbar als
+    <time datetime="2026-08-11T18:32:11.000Z">. Auf der Seite stehen aber
+    MEHRERE solcher Elemente — jeder Kommentar hat auch eins. Kommentare
+    koennen nur NACH dem Post entstanden sein, deshalb ist der frueheste
+    Zeitstempel der Seite der Post selbst. Diese Heuristik steht hier bewusst
+    ausgeschrieben, damit niemand den Wert fuer eine offizielle API-Angabe
+    haelt.
+
+    Rueckgabe {"iso", "text", "error"} — findet sich kein Zeitstempel (z.B.
+    Login-Wand), steht das als "error" drin und KEIN geratener Zeitpunkt."""
+    result = {"iso": None, "text": None, "error": None}
+    page = None
+    try:
+        ctx = await _get_context()
+        page = await ctx.new_page()
+        await _goto_tolerant(page, url)
+        await page.wait_for_timeout(3000)
+        stamps = await page.evaluate(
+            """() => Array.from(document.querySelectorAll('time[datetime]'))
+                .map(t => t.getAttribute('datetime')).filter(Boolean)"""
+        )
+    except Exception as e:
+        _log(f"POST {url}: Zeitpunkt ERROR {e}")
+        result["error"] = f"{e.__class__.__name__}: {e}"
+        return result
+    finally:
+        if page is not None:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+    parsed = []
+    for stamp in stamps:
+        try:
+            parsed.append(datetime.fromisoformat(stamp.replace("Z", "+00:00")))
+        except ValueError:
+            continue
+    if not parsed:
+        result["error"] = (
+            "auf der Seite stand kein Zeitstempel (haeufigste Ursache: Instagram hat eine "
+            "Login-Wand statt des Posts ausgeliefert, oder der Post ist geloescht/privat)"
+        )
+        return result
+    local = min(parsed).astimezone(ZoneInfo("Europe/Berlin"))
+    result["iso"] = local.isoformat()
+    result["text"] = local.strftime("%d.%m.%Y %H:%M Uhr (Berlin)")
+    _log(f"POST {url}: veroeffentlicht {result['text']}")
+    return result
 
 
 async def check_post_public_stats(url: str, anthropic_client, save_screenshot: bool = False) -> dict:

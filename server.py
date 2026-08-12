@@ -100,6 +100,7 @@ import memory
 import semantic_memory
 import knowledge_graph
 import instagram_tools
+import tiktok_tools
 import research
 import claude_code_tool
 import screen_control
@@ -2454,6 +2455,255 @@ async def _tool_reel_analysis(args: dict) -> str:
     return "\n".join(lines)
 
 
+# --- "Ist das Ding wirklich draussen — und wann?" (Instagram UND TikTok) -----
+# Ahmad, 2026-08-12: er wollte, dass Jarvis SELBST auf der Plattform nachsieht,
+# ob und WANN ein Reel gepostet wurde. Zwei Luecken steckten darin:
+#   1. TikTok kam im ganzen Projekt nicht vor — kein Modul, kein Werkzeug,
+#      keine Zeile Code. Laut claude_app_status.md postet Ahmad dort aber
+#      genauso wie auf Instagram, d.h. "ist das Video draussen?" war fuer die
+#      halbe Posting-Flaeche schlicht nicht beantwortbar.
+#   2. Das WANN fehlte auf beiden Plattformen. trial_reel_check/reel_analysis
+#      liefern Links und Zahlen, aber keinen Veroeffentlichungszeitpunkt — und
+#      genau der entscheidet beim Trial-Reel-Workflow, wann die 3-Stunden-
+#      Insights faellig sind.
+# Neu dafuer: tiktok_tools.py (oeffentlich lesen, nie einloggen/posten) und
+# instagram_tools.get_post_published_at(). Der TikTok-Zeitpunkt kommt aus der
+# Video-ID (oberen 32 Bit = Unix-Zeit), ist also exakt und funktioniert auch
+# dann noch, wenn TikTok das Scrapen blockt.
+#
+# Was es bewusst NICHT liefert: Insights-/Analytics-Screenshots. Die zeigen
+# beide Plattformen nur INNERHALB des Posting-Accounts, dort wird nicht
+# eingeloggt (feste Grenzen 2+3 in claude_app_status.md). Die Grenze steht im
+# Ergebnis oben statt als Fussnote.
+#
+# Rein lesend (oeffentliche Seiten ansehen, Screenshot lokal ablegen) —
+# nichts davon ist nach aussen sichtbar, deshalb KEIN Bestaetigungs-Gate.
+
+_PUBLISHED_CHECK_RECENT_LIMIT = 5   # neueste Beitraege pro Profil
+_PUBLISHED_CHECK_IG_TIME_LOOKUPS = 3  # Instagram: ein Seitenaufruf PRO Post noetig
+
+
+def _published_check_platform(url: str) -> tuple:
+    """(Plattform, navigierbare URL) — oder ('', '') wenn das kein Post-Link
+    einer Plattform ist, die ich lesen kann."""
+    tiktok_url = tiktok_tools.canonical_video_url(url)
+    if tiktok_url:
+        return "tiktok", tiktok_url
+    instagram_url = instagram_tools.canonical_post_url(url)
+    if instagram_url:
+        return "instagram", instagram_url
+    return "", ""
+
+
+def _published_check_age(iso: str) -> str:
+    """'gestern, vor 19.4 h' — die Einordnung, nach der wirklich gefragt wird.
+    Bei unlesbarem Zeitstempel lieber gar kein Zusatz als ein geratener."""
+    try:
+        moment = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return ""
+    now = datetime.now(ZoneInfo("Europe/Berlin"))
+    days = (now.date() - moment.date()).days
+    label = {0: "heute", 1: "gestern", 2: "vorgestern"}.get(days)
+    if label is None:
+        label = f"vor {days} Tagen" if days > 0 else "in der Zukunft (?)"
+    return f"{label}, vor {(now - moment).total_seconds() / 3600:.1f} h"
+
+
+async def _published_check_one(platform: str, url: str, with_stats: bool) -> list:
+    """Ein konkreter Link: Zeitpunkt, oeffentliche Zahlen, Screenshot."""
+    lines = [f"Konkreter Link ({platform}): {url}"]
+
+    if platform == "tiktok":
+        when = tiktok_tools.published_at(url)
+    else:
+        when = await instagram_tools.get_post_published_at(url)
+
+    if when.get("text"):
+        age = _published_check_age(when.get("iso"))
+        source = (
+            "aus der TikTok-Video-ID gerechnet (obere 32 Bit = Unix-Zeit, exakt, kein Schaetzwert)"
+            if platform == "tiktok"
+            else "aus dem <time>-Element der Post-Seite (fruehester Zeitstempel der Seite = der "
+                 "Post selbst, spaetere gehoeren zu Kommentaren)"
+        )
+        lines.append(f"- VEROEFFENTLICHT: {when['text']}{' — ' + age if age else ''}; {source}.")
+    else:
+        lines.append(
+            f"- Veroeffentlichungszeitpunkt NICHT bestimmbar: {_trial_reel_short_error(when.get('error'))}. "
+            "Ich nenne hier keine Uhrzeit auf Verdacht."
+        )
+
+    if not with_stats:
+        lines.append("- Oeffentliche Zahlen/Screenshot: uebersprungen (with_stats=false).")
+        return lines
+
+    try:
+        if platform == "tiktok":
+            stats = await tiktok_tools.check_video_public_stats(url, ai, save_screenshot=True)
+        else:
+            stats = await instagram_tools.check_post_public_stats(url, ai, save_screenshot=True)
+    except Exception as e:
+        stats = {"error": f"{e.__class__.__name__}: {e}"}
+
+    # Kurzlink (vm./vt.tiktok.com): erst die Ziel-URL nach der Weiterleitung
+    # traegt die ID — damit laesst sich der Zeitpunkt nachtraeglich doch noch
+    # exakt bestimmen.
+    final_url = stats.get("final_url")
+    if platform == "tiktok" and not when.get("text") and final_url and final_url != url:
+        retry = tiktok_tools.published_at(final_url)
+        if retry.get("text"):
+            lines.append(
+                f"- VEROEFFENTLICHT: {retry['text']}"
+                f"{' — ' + _published_check_age(retry.get('iso')) if _published_check_age(retry.get('iso')) else ''}"
+                f"; aus der Video-ID des aufgeloesten Links ({final_url}) gerechnet."
+            )
+
+    if stats.get("blocked"):
+        lines.append(
+            f"- Zahlen nicht gelesen: {_trial_reel_short_error(stats['blocked'])}. Das heisst NICHT, "
+            "dass das Video weg ist — es heisst, dass ich die Seite nicht sehen konnte."
+        )
+    if stats.get("raw"):
+        lines.append(f"- Oeffentliche Zahlen: {stats['raw']} (abgelesen {stats.get('timestamp')})")
+    if stats.get("error"):
+        lines.append(
+            f"- Zahlen nicht gelesen: {_trial_reel_short_error(stats['error'])} — hier wird nichts geschaetzt."
+        )
+    if stats.get("screenshot_path"):
+        lines.append(
+            f"- Screenshot: {stats['screenshot_path']} — OEFFENTLICHE Ansicht der Seite, "
+            "ausdruecklich KEIN Insights-/Analytics-Panel. Sag das genau so, wenn du ihn weitergibst."
+        )
+    elif stats.get("screenshot_error"):
+        lines.append(f"- Screenshot nicht gespeichert: {_trial_reel_short_error(stats['screenshot_error'])}.")
+    return lines
+
+
+async def _published_check_profile(platform: str, handle: str) -> list:
+    """Ein Profil: was liegt oben drauf, und wann kam es hoch."""
+    lines = [f"Live-Blick auf das oeffentliche Profil @{handle} ({platform}):"]
+
+    if platform == "tiktok":
+        recent = await tiktok_tools.get_recent_video_links(handle, limit=_PUBLISHED_CHECK_RECENT_LIMIT)
+    else:
+        recent = await instagram_tools.get_recent_post_links(handle, limit=_PUBLISHED_CHECK_RECENT_LIMIT)
+
+    if recent.get("error"):
+        lines.append(
+            f"- Profil nicht gelesen ({_trial_reel_short_error(recent['error'])}) — ob dort inzwischen "
+            "etwas gepostet wurde, weiss ich damit NICHT. Das ist ausdruecklich kein 'es wurde nichts gepostet'."
+        )
+        return lines
+    if recent.get("blocked"):
+        lines.append(
+            f"- Achtung: {recent['blocked']}. Was unten steht (oder fehlt), kann davon verfaelscht sein."
+        )
+
+    links = recent.get("links") or []
+    if not links:
+        lines.append(
+            "- Keine Beitraege gefunden. Moegliche Gruende: Profil privat/leer, die Plattform hat "
+            "die Seite anders ausgeliefert, oder es ist wirklich nichts da — welcher davon zutrifft, "
+            "sehe ich von hier aus nicht."
+        )
+        return lines
+
+    if platform == "tiktok":
+        # Kostenlos: der Zeitpunkt steckt in jeder Video-ID, kein Seitenaufruf.
+        for url in links:
+            when = tiktok_tools.published_at(url)
+            if when.get("text"):
+                age = _published_check_age(when.get("iso"))
+                lines.append(f"- {url} — gepostet {when['text']}{' (' + age + ')' if age else ''}")
+            else:
+                lines.append(f"- {url} — Zeitpunkt nicht bestimmbar ({_trial_reel_short_error(when.get('error'))})")
+        return lines
+
+    # Instagram: der Zeitpunkt kostet EINEN Seitenaufruf pro Post, deshalb
+    # gedeckelt — und die Deckelung wird genannt, statt sie zu verschweigen.
+    for i, url in enumerate(links):
+        if i >= _PUBLISHED_CHECK_IG_TIME_LOOKUPS:
+            lines.append(f"- {url} — Zeitpunkt nicht abgefragt (Deckel: {_PUBLISHED_CHECK_IG_TIME_LOOKUPS} Posts pro Durchlauf)")
+            continue
+        when = await instagram_tools.get_post_published_at(url)
+        if when.get("text"):
+            age = _published_check_age(when.get("iso"))
+            lines.append(f"- {url} — gepostet {when['text']}{' (' + age + ')' if age else ''}")
+        else:
+            lines.append(f"- {url} — Zeitpunkt nicht auslesbar ({_trial_reel_short_error(when.get('error'))})")
+    return lines
+
+
+async def _tool_post_published_check(args: dict) -> str:
+    raw_url = (args.get("url") or "").strip()
+    handle = (args.get("handle") or "").strip().lstrip("@")
+    platform_arg = (args.get("platform") or "").strip().lower()
+    with_stats = args.get("with_stats") is not False
+
+    if not raw_url and not handle:
+        return (
+            "ERROR: Weder Link noch Account angegeben. Ich brauche entweder den konkreten "
+            "Post-/Video-Link (instagram.com/reel/... oder tiktok.com/@name/video/...) oder einen "
+            "Account-Namen plus platform ('instagram' oder 'tiktok')."
+        )
+
+    now = datetime.now(ZoneInfo("Europe/Berlin")).strftime("%d.%m.%Y %H:%M")
+    lines = [f"Veroeffentlichungs-Check (Stand {now}):"]
+    lines.append(
+        "GRENZE 1 — gepostet habe ICH nichts: ich poste auf keinem Account und kann es auch nicht "
+        "(kein Login auf den Posting-Accounts, keine Post-Funktion im Code). Laut dokumentierter "
+        "Rollenverteilung postet Ahmad."
+    )
+    lines.append(
+        "GRENZE 2 — Insights-/Analytics-Screenshot geht nicht: Reach, US-Audience-% und "
+        "Zuschauerbindung zeigen Instagram UND TikTok nur INNERHALB des Accounts, in dem gepostet "
+        "wurde. Ich sehe nur die oeffentliche Ansicht. Alles unten stammt daraus — keine "
+        "geschaetzten Insights-Werte."
+    )
+
+    if raw_url:
+        platform, url = _published_check_platform(raw_url)
+        if not platform:
+            lines.append(
+                f"- '{raw_url}' ist weder ein Instagram- noch ein TikTok-Post-Link — dazu sehe ich "
+                "mir nichts an. Andere Plattformen (Facebook, YouTube) kann ich hier gar nicht pruefen."
+            )
+        else:
+            lines.extend(await _published_check_one(platform, url, with_stats))
+            if not handle and not platform_arg:
+                platform_arg = platform
+
+    if handle:
+        platform = platform_arg or "instagram"
+        if platform not in ("instagram", "tiktok"):
+            lines.append(
+                f"- platform='{platform_arg}' kenne ich nicht — ich kann nur 'instagram' und 'tiktok' lesen."
+            )
+        else:
+            if platform == "tiktok":
+                own_tiktok = tiktok_tools.own_accounts()
+                if not own_tiktok:
+                    lines.append(
+                        "Hinweis: in config.json steht keine Liste eigener TikTok-Accounts "
+                        "('tiktok_accounts'). Ich pruefe @" + handle + " trotzdem, kann aber nicht "
+                        "belegen, dass das einer von uns ist — nachtragen lohnt sich."
+                    )
+                elif handle.lower() not in [a.lower() for a in own_tiktok]:
+                    lines.append(
+                        f"Hinweis: @{handle} steht nicht in unseren eigenen TikTok-Accounts "
+                        f"({', '.join('@' + a for a in own_tiktok)}) — ich sehe ihn als fremdes Profil an."
+                    )
+            lines.extend(await _published_check_profile(platform, handle))
+
+    lines.append(
+        "Einordnung: oeffentlich ist einem Beitrag NICHT anzusehen, ob er ein Trial Reel ist oder "
+        "zu welcher Welle er gehoert — das kommt allein aus dem Sheet (trial_reel_check). Und ein "
+        "gefundener Beitrag belegt nicht, WER ihn gepostet hat (post_author_check)."
+    )
+    return "\n".join(lines)
+
+
 # --- Eigenes Handlungsprotokoll: "war das ich?" ------------------------------
 # Ahmad, 2026-08-12: er fragte, ob JARVIS SELBST am Tag davor ein Trial Reel
 # gepostet hatte oder Jerome. Darauf gab es keine belegte Antwort — nicht weil
@@ -3968,6 +4218,63 @@ TOOL_REGISTRY: dict = {
             },
         },
         handler=_tool_reel_analysis,
+        speak_result=True,
+        slow=True,
+        verbose_reply=True,
+    ),
+    "post_published_check": ToolSpec(
+        schema={
+            "name": "post_published_check",
+            "description": (
+                "Selbst auf der Plattform nachsehen, OB und vor allem WANN ein Reel/Video "
+                "veroeffentlicht wurde — Instagram UND TikTok. Nutzen bei 'ist das Reel schon "
+                "draussen?', 'wann genau wurde das gepostet?', 'schau mal auf TikTok nach', 'seit "
+                "wann laeuft das Video?', 'wurde heute schon was gepostet?'. Braucht entweder "
+                "einen konkreten Link (dann: exakter Veroeffentlichungszeitpunkt, oeffentliche "
+                "Zahlen, Screenshot der oeffentlichen Ansicht) oder einen Account-Namen plus "
+                "platform (dann: die neuesten Beitraege des oeffentlichen Profils, jeder mit "
+                "Zeitpunkt und 'heute/gestern/vor X Stunden'). Der TikTok-Zeitpunkt kommt exakt "
+                "aus der Video-ID, der Instagram-Zeitpunkt aus dem Zeitstempel der Post-Seite. "
+                "Das ist das einzige Werkzeug fuer TikTok ueberhaupt; fuer Instagram beantwortet "
+                "es als einziges das WANN. Abgrenzung: Trial-Reel-Stand eines eigenen "
+                "Instagram-Accounts -> trial_reel_check, ein Reel inhaltlich analysieren -> "
+                "reel_analysis, wer gepostet hat -> post_author_check. WICHTIG: Insights/"
+                "Analytics (Reach, US-Audience-%) kann es NICHT liefern — die zeigen beide "
+                "Plattformen nur im eingeloggten Posting-Account, und dort wird bewusst nicht "
+                "eingeloggt. Fehler und Grenzen aus dem Ergebnis unveraendert weitergeben und "
+                "NIEMALS selbst eine Uhrzeit oder Zahl nennen, die nicht im Ergebnis steht — ein "
+                "nicht erreichbares Profil ist kein 'es wurde nichts gepostet'. Sag vorher einen "
+                "kurzen Satz wie 'Ich schaue nach, ob und wann das draussen ist.'"
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Post-/Video-Link (instagram.com/reel/..., /p/..., tiktok.com/@name/video/...).",
+                    },
+                    "handle": {
+                        "type": "string",
+                        "description": "Account ohne @, wenn es um 'wurde da inzwischen was gepostet?' geht.",
+                    },
+                    "platform": {
+                        "type": "string",
+                        "enum": ["instagram", "tiktok"],
+                        "description": "Plattform zum handle. Standard: instagram. Bei einem Link wird sie aus dem Link erkannt.",
+                    },
+                    "with_stats": {
+                        "type": "boolean",
+                        "description": (
+                            "Optional, Standard true: zum Link auch die oeffentlichen Zahlen "
+                            "ablesen und einen Screenshot speichern. false = nur der Zeitpunkt "
+                            "(schneller, kein Screenshot)."
+                        ),
+                    },
+                },
+                "required": [],
+            },
+        },
+        handler=_tool_post_published_check,
         speak_result=True,
         slow=True,
         verbose_reply=True,
