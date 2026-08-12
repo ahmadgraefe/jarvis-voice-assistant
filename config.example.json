@@ -12,5 +12,13 @@
   "amadeus_api_key": "YOUR_AMADEUS_API_KEY",
   "amadeus_api_secret": "YOUR_AMADEUS_API_SECRET",
   "amadeus_environment": "test",
+  "proxy_cheap_api_key": "YOUR_PROXY_CHEAP_API_KEY",
+  "proxy_cheap_api_secret": "YOUR_PROXY_CHEAP_API_SECRET",
+  "instagram_graph_accounts": {
+    "YOUR_INSTAGRAM_HANDLE": {
+      "user_id": "YOUR_INSTAGRAM_USER_ID",
+      "access_token": "YOUR_LONG_LIVED_ACCESS_TOKEN"
+    }
+  },
   "apps": ["obsidian://open"]
 }

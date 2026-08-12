@@ -448,6 +448,7 @@ def _update_winner_tracking_insights_sync(video_link: str, fields: dict) -> str:
     col_views = _find_column(header, "views")
     col_us_audience = _find_column(header, "us audience")
     col_baseline = _find_column(header, "baseline")
+    col_comments_total = _find_column(header, "comments\ntotal", "comments total")
     col_notes = _find_column(header, "notes")
 
     target_id = instagram_tools.normalize_video_url(video_link)
@@ -461,6 +462,8 @@ def _update_winner_tracking_insights_sync(video_link: str, fields: dict) -> str:
                 values[col_us_audience] = fields["us_audience_pct"]
             if fields.get("baseline_avg") is not None and col_baseline is not None:
                 values[col_baseline] = fields["baseline_avg"]
+            if fields.get("comments_total") is not None and col_comments_total is not None:
+                values[col_comments_total] = fields["comments_total"]
             if fields.get("notes") and col_notes is not None:
                 existing = _cell(row, col_notes)
                 values[col_notes] = f"{existing} | {fields['notes']}" if existing else fields["notes"]

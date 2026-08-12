@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import anthropic
 import httpx
@@ -31,6 +32,7 @@ import fanplace
 import gmail_tools
 import goal_tracker
 import finance_tracker
+import instagram_graph_api
 import instagram_tools
 import jerome_comm
 import knowledge_graph
@@ -889,6 +891,16 @@ async def _check_viral_candidates(account: str, videos: list, config: dict, is_o
             continue
 
         if is_own_account:
+            if account in config.get("instagram_graph_accounts", {}):
+                # 2026-08-12: dieser Account hat jetzt echte Graph-API-Abdeckung
+                # (instagram_insights_pass) -- die schreibt bereits mit echten
+                # Zahlen in dasselbe Winner-Tracking-Sheet. Ohne diesen Ueberspring
+                # wuerde der vom Vision-Modell geschaetzte Screenshot-Pfad hier eine
+                # zweite, doppelte Zeile fuer denselben Post anlegen. Das Screenshot-
+                # Scraping selbst laeuft fuer diesen Account unveraendert weiter
+                # (video_analysis.jsonl / aehnliche-Accounts-Erkennung), nur dieser
+                # eine Sheet-Schreib-Zweig wird uebersprungen.
+                continue
             entry = {"account": account, "video_link": url, "views": stats.get("views") or 0}
             if stats.get("comments") is not None:
                 entry["comments_total"] = stats["comments"]
@@ -2499,6 +2511,160 @@ async def content_brief_pass(config: dict):
     _log(f"Content-Brief gesendet: {result}")
 
 
+INSTAGRAM_INSIGHTS_MORNING_HOUR = 7   # Ahmad, 2026-08-12: "jeden Tag um 07:00 Uhr Berlin-Zeit"
+INSTAGRAM_INSIGHTS_EVENING_HOUR = 22  # Ahmad, 2026-08-12: "optional zusaetzlich abends um 22:00 Uhr"
+INSTAGRAM_INSIGHTS_RETRY_SECONDS = 60 * 60  # wie CONTENT_BRIEF_RETRY_SECONDS — nicht bei jedem 60s-Tick neu versuchen
+
+
+async def _instagram_insights_for_account(handle: str, acc: dict) -> dict:
+    """Ein kompletter Durchlauf fuer EINEN Account: Token pruefen, Reels der
+    letzten 30 Tage holen, pro Reel echte Insights holen, ins bestehende
+    Winner-Tracking-Sheet schreiben (neue Zeile oder Update einer schon
+    bekannten). Gibt {"ok", "fatal_error", "reels_processed"} zurueck."""
+    user_id, token = acc["user_id"], acc["access_token"]
+
+    check = await instagram_graph_api.verify_token(user_id, token)
+    if not check["ok"]:
+        err = check["error"]
+        return {"ok": False, "fatal_error": err["message"] if err.get("fatal") else None, "reels_processed": 0}
+
+    reels_result = await instagram_graph_api.get_recent_reels(user_id, token)
+    if "error" in reels_result:
+        err = reels_result["error"]
+        return {"ok": False, "fatal_error": err["message"] if err.get("fatal") else None, "reels_processed": 0}
+
+    alerted = _load_viral_alerted()
+    processed = 0
+    for item in reels_result["priority"] + reels_result["rest"]:
+        media_id, permalink = item.get("id"), item.get("permalink")
+        if not media_id or not permalink:
+            continue
+        insights_result = await instagram_graph_api.get_reel_insights(media_id, token)
+        if "error" in insights_result:
+            continue  # einzelner Reel-Fehler blockiert nicht die anderen
+
+        values = insights_result["insights"]
+        views = values.get("views") or 0
+        comments = values.get("comments")
+        # Likes/Reichweite/Saves/Shares haben keine eigene Sheet-Spalte (siehe
+        # sheets_tools.py Winner-Tracking-Schema) -- kompakt ins bestehende
+        # Notes-Feld statt unaufgefordert neue Spalten in Ahmads/Jeromes
+        # laufende Formeln (Multiplier/Outlier/Decision) einzufuegen.
+        note_parts = []
+        if values.get("likes") is not None:
+            note_parts.append(f"{values['likes']} Likes")
+        if values.get("reach") is not None:
+            note_parts.append(f"{values['reach']} Reichweite")
+        if values.get("saved") is not None:
+            note_parts.append(f"{values['saved']} Saves")
+        if values.get("shares") is not None:
+            note_parts.append(f"{values['shares']} Shares")
+        notes = f"IG Insights: {', '.join(note_parts)}" if note_parts else None
+
+        normalized = instagram_tools.normalize_video_url(permalink)
+        if normalized in alerted:
+            fields = {"views": views}
+            if comments is not None:
+                fields["comments_total"] = comments
+            if notes:
+                fields["notes"] = notes
+            update_result = await sheets_tools.update_winner_tracking_insights(permalink, fields)
+            _log(f"Insights-Update @{handle} {permalink}: {update_result}")
+        else:
+            entry = {"account": handle, "video_link": permalink, "views": views}
+            if comments is not None:
+                entry["comments_total"] = comments
+            add_result = await sheets_tools.add_winner_tracking_entry(entry)
+            _log(f"Neuer Insights-Eintrag @{handle} {permalink}: {add_result}")
+            if notes:
+                await sheets_tools.update_winner_tracking_insights(permalink, {"notes": notes})
+            _mark_viral_alerted(normalized)
+            alerted.add(normalized)
+        processed += 1
+
+    return {"ok": True, "fatal_error": None, "reels_processed": processed}
+
+
+async def instagram_insights_pass(config: dict):
+    """Ersetzt fuer Ahmads eigene Accounts das Screenshot-Raten durch echte,
+    offizielle Meta-Insights (Ahmad, 2026-08-12: taeglich 07:00 + optional
+    22:00 Berlin-Zeit, "Ahmad muss das Tracking nicht mehr manuell machen").
+    Kein Proxy-Routing -- direkter Server-Call mit dem offiziellen Token,
+    siehe instagram_graph_api.py-Modul-Docstring fuer die Begruendung.
+
+    Explizit ZoneInfo("Europe/Berlin") statt time.strftime("%H") -- der Server
+    laeuft vermutlich in UTC, und anders als die uebrigen Passes in dieser
+    Datei muss diese eine Uhrzeit wirklich Berlin-Zeit treffen (Ahmads
+    ausdruecklicher Wunsch "07:00 Uhr Berlin-Zeit")."""
+    accounts = instagram_graph_api.get_configured_accounts()
+    if not accounts:
+        return
+
+    berlin_now = datetime.now(ZoneInfo("Europe/Berlin"))
+    today = berlin_now.strftime("%Y-%m-%d")
+    hour = berlin_now.hour
+
+    slot = None
+    if hour >= INSTAGRAM_INSIGHTS_MORNING_HOUR and not memory.has_instagram_insights_run_today("morning", today):
+        slot = "morning"
+    elif hour >= INSTAGRAM_INSIGHTS_EVENING_HOUR and not memory.has_instagram_insights_run_today("evening", today):
+        slot = "evening"
+    if slot is None:
+        return
+
+    timers = _load_timers()
+    slot_retry_key = f"ig_insights_{slot}_attempt"
+    if time.time() - timers.get(slot_retry_key, 0) < INSTAGRAM_INSIGHTS_RETRY_SECONDS:
+        return
+    _save_timer(slot_retry_key, time.time())
+
+    _log(f"Instagram-Insights-Pass ({slot}) startet fuer {len(accounts)} Account(s)...")
+    failed_handles = []
+    total_processed = 0
+    any_account_succeeded = False
+    for handle, acc in accounts.items():
+        # Pro-Account-Cooldown: ein kaputter Token bei EINEM Account darf die
+        # anderen nicht fuer den Tag blockieren, soll aber auch nicht bei
+        # jedem 60s-Tick des Haupt-Loops sofort erneut angefragt werden.
+        acc_retry_key = f"ig_insights_account_{handle}"
+        if time.time() - timers.get(acc_retry_key, 0) < INSTAGRAM_INSIGHTS_RETRY_SECONDS:
+            continue
+        _save_timer(acc_retry_key, time.time())
+
+        result = await _instagram_insights_for_account(handle, acc)
+        if result["ok"]:
+            any_account_succeeded = True
+            total_processed += result["reels_processed"]
+        elif result["fatal_error"]:
+            failed_handles.append((handle, result["fatal_error"]))
+
+    if failed_handles and not memory.has_recent_question_about("Instagram Graph API Token", hours=20):
+        handles_text = ", ".join(f"@{h}" for h, _ in failed_handles)
+        detail = "; ".join(f"@{h}: {msg}" for h, msg in failed_handles)
+        question = (
+            f"Instagram Graph API Token ungueltig fuer {handles_text}. Bitte neuen "
+            f"Token direkt aus der Meta-App holen (nicht ueber einen Chat-Umweg). "
+            f"Details: {detail}"
+        )
+        client = anthropic.AsyncAnthropic(api_key=config["anthropic_api_key"])
+        try:
+            urgency = await _classify_question_urgency(client, question)
+        finally:
+            await client.close()
+        memory.add_pending_question(question, urgency=urgency)
+
+    # Nur als "fertig fuer heute" markieren wenn WENIGSTENS EIN Account
+    # tatsaechlich erfolgreich verarbeitet wurde -- sonst wuerde ein Tag mit
+    # ausschliesslich kaputten Tokens trotzdem als erledigt gelten, und der
+    # naechste faellige Slot wuerde es gar nicht erst nochmal versuchen.
+    if any_account_succeeded:
+        memory.mark_instagram_insights_done(slot, today)
+    _log(
+        f"Instagram-Insights-Pass ({slot}) fertig: {total_processed} Reel(s) verarbeitet, "
+        f"{len(failed_handles)} Account(s) mit kaputtem Token."
+    )
+
+
 async def morning_briefing_pass(config: dict):
     """Roadmap Punkt 6 — Gegenstueck zu daily_summary_pass, aber morgens und
     komplett selbststaendig (kein Doppelklatschen noetig, das war bisher die
@@ -2720,6 +2886,7 @@ async def main():
         await _run_pass_safely("Tages-Zusammenfassung", config, daily_summary_pass(config))
         await _run_pass_safely("Morgen-Briefing", config, morning_briefing_pass(config))
         await _run_pass_safely("Content-Brief", config, content_brief_pass(config))
+        await _run_pass_safely("Instagram-Insights", config, instagram_insights_pass(config), timeout=300)
 
         # Recherche laeuft bewusst auf ihrem EIGENEN, langsameren Takt (1-2x/Tag,
         # Ahmads Wunsch) — losgeloest vom Business-Zyklus unten, der geschaefts-
