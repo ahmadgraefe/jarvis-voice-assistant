@@ -24,6 +24,7 @@ SNAPSHOTS_PATH = os.path.join(os.path.dirname(__file__), "memory", "instagram_sn
 TRACKED_LINKS_PATH = os.path.join(os.path.dirname(__file__), "memory", "tracked_links.jsonl")
 LINK_SNAPSHOTS_PATH = os.path.join(os.path.dirname(__file__), "memory", "link_snapshots.jsonl")
 VIDEO_ANALYSIS_PATH = os.path.join(os.path.dirname(__file__), "memory", "video_analysis.jsonl")
+POST_SHOTS_DIR = os.path.join(os.path.dirname(__file__), "memory", "post_screenshots")
 # Server (2026-08-10): ~/Library/Logs existiert auf dem Linux-Server nicht.
 LOG_PATH = (
     "/var/log/jarvis-instagram.log" if os.environ.get("JARVIS_ROLE") == "server"
@@ -843,6 +844,111 @@ async def check_post(url: str, anthropic_client) -> dict:
 
     with open(LINK_SNAPSHOTS_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(result, ensure_ascii=False) + "\n")
+    return result
+
+
+async def get_recent_post_links(handle: str, limit: int = 4) -> dict:
+    """Nur die Links der neuesten Beitraege/Reels eines Profils — ohne die
+    Vision-Analyse pro Post, die analyze_recent_videos zusaetzlich macht.
+
+    Rueckgabe {"links": [...], "error": None oder Text}. Der Fehler wird
+    bewusst ZURUECKGEGEBEN und nicht nur geloggt: bei einer Frage wie "wurde
+    da inzwischen was gepostet?" waere "Profil nicht erreichbar" als "es
+    wurde nichts gepostet" gelesen die schlimmste moegliche Antwort."""
+    page = None
+    try:
+        # _get_context() bewusst INNERHALB des try: schon der Browser-Start
+        # kann scheitern (fehlender/kaputter Chromium, tote Session), und auch
+        # das muss als ehrliches "error" zurueckkommen statt den Aufrufer mit
+        # einer Exception zu treffen.
+        ctx = await _get_context()
+        page = await ctx.new_page()
+        await _goto_tolerant(page, f"https://www.instagram.com/{handle}/")
+        await page.wait_for_timeout(3000)
+        return {"links": await _get_recent_post_links(page, limit), "error": None}
+    except Exception as e:
+        _log(f"{handle}: Fehler beim Sammeln der neuesten Post-Links: {e}")
+        return {"links": [], "error": f"{e.__class__.__name__}: {e}"}
+    finally:
+        if page is not None:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+
+async def check_post_public_stats(url: str, anthropic_client, save_screenshot: bool = False) -> dict:
+    """Die OEFFENTLICH sichtbaren Zahlen EINES Posts (Views/Likes/Kommentare)
+    per Screenshot + Vision, optional mit dem Screenshot als PNG-Datei
+    (Pfad in "screenshot_path").
+
+    Bewusst getrennt von check_post(): das schreibt jede Messung ins
+    Link-Snapshot-Log, das zu den ausdruecklich verfolgten Links gehoert
+    (add_tracked_link/format_link_trends) — ein einmaliger Blick auf einen
+    beliebigen Post hat darin nichts zu suchen, sonst tauchen dort Links als
+    "verfolgt" auf, die nie jemand verfolgen wollte.
+
+    WICHTIG: das ist die oeffentliche Post-Ansicht, NICHT das Insights-Panel.
+    Reach, Publikums-Herkunft und Interaktionsraten zeigt Instagram nur
+    innerhalb des Accounts, in dem gepostet wurde — dort ist diese Session
+    nicht eingeloggt (sie gehoert dem privaten Ansehen-Account)."""
+    result = {"url": url, "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")}
+    page = None
+    try:
+        # wie in get_recent_post_links: auch ein fehlgeschlagener Browser-Start
+        # wird zum ehrlichen "error"-Feld, nicht zur Exception beim Aufrufer.
+        ctx = await _get_context()
+        page = await ctx.new_page()
+        await _goto_tolerant(page, url)
+        await page.wait_for_timeout(4000)
+        png_bytes = await _screenshot(page)
+    except Exception as e:
+        _log(f"POST {url}: ERROR {e}")
+        result["error"] = f"{e.__class__.__name__}: {e}"
+        return result
+    finally:
+        if page is not None:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+    if save_screenshot:
+        try:
+            os.makedirs(POST_SHOTS_DIR, exist_ok=True)
+            path = os.path.join(
+                POST_SHOTS_DIR,
+                f"{normalize_video_url(url)}_{time.strftime('%Y%m%d-%H%M%S')}.png",
+            )
+            with open(path, "wb") as f:
+                f.write(png_bytes)
+            result["screenshot_path"] = path
+        except OSError as e:
+            result["screenshot_error"] = str(e)
+
+    try:
+        response = await anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                 "data": base64.b64encode(png_bytes).decode("utf-8")}},
+                    {"type": "text", "text": (
+                        "Das ist ein Screenshot eines Instagram Posts/Reels. Lies die sichtbaren "
+                        "Statistiken ab: Aufrufe/Views, Likes, Kommentare. Antworte NUR im Format "
+                        "'views=X likes=Y comments=Z' mit den Zahlen, die du siehst (schreibe "
+                        "'unbekannt' fuer Werte, die nicht sichtbar sind). Keine weiteren Erklaerungen."
+                    )},
+                ],
+            }],
+        )
+        result["raw"] = response.content[0].text.strip()
+        _log(f"POST {url}: {result['raw']}")
+    except Exception as e:
+        _log(f"POST {url}: Vision ERROR {e}")
+        result["error"] = f"Zahlen nicht auswertbar ({e.__class__.__name__}: {e})"
     return result
 
 

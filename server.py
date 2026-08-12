@@ -1978,6 +1978,264 @@ async def _tool_post_author_check(args: dict) -> str:
     return "\n".join(lines)
 
 
+# --- Trial Reel auf einem eigenen Account: gepostet? Link? Insights? ---------
+# Ahmad, 2026-08-12: er fragte, ob auf @lunaxvale ein Trial Reel gepostet
+# wurde, und wollte den Link plus einen Insights-Screenshot. Beides hatte ich
+# nicht — es gab kein Werkzeug, das den Trial-Reel-Stand EINES Accounts
+# zusammenzieht (winner_status kennt nur Winner Tracking, video_analysis nur
+# die oeffentlichen Zahlen, und die Trial-Reel-Wellen im Sheet waren ueber
+# gar kein aufrufbares Tool erreichbar).
+#
+# Dieses Werkzeug beantwortet die Link-Frage wirklich (dokumentierte Welle +
+# Live-Blick aufs oeffentliche Profil), den Insights-Screenshot dagegen
+# BEWUSST NICHT: Reach/US-Audience-%/Interaktionen zeigt Instagram nur INNERHALB
+# des Accounts, in dem gepostet wurde. Eingeloggt ist hier Ahmads privater
+# Ansehen-Account, und auf den echten Posting-Accounts wird bewusst nicht
+# eingeloggt/getippt (feste Grenze 2+3 in claude_app_status.md, Ban-Risiko).
+# Statt eines erfundenen Insights-Werts liefert es deshalb die Grenze klar
+# benannt, den Screenshot der OEFFENTLICHEN Post-Ansicht und die
+# Insights-Zahlen, die bereits im Sheet stehen.
+#
+# Rein lesend (Sheet lesen, oeffentliche Instagram-Seiten ansehen, Screenshot
+# lokal ablegen) — nichts davon ist nach aussen sichtbar, deshalb bewusst KEIN
+# Bestaetigungs-Gate.
+
+_TRIAL_REEL_RECENT_LIMIT = 4  # neueste Beitraege, die live abgeglichen werden
+
+
+def _trial_reel_short_error(text) -> str:
+    """Fehlertexte auf eine Zeile ziehen und kappen. Playwright liefert bei
+    fehlendem Browser einen mehrzeiligen ASCII-Kasten mit Installations-Tipp
+    — ungekappt sprengt der die Antwort und wird beim Vorlesen zu Muell. Die
+    Ursache (erster Satz) bleibt drin, nur der Rest fliegt raus."""
+    compact = " ".join(str(text).split())
+    return compact if len(compact) <= 200 else compact[:200].rstrip() + " [...]"
+
+
+def _trial_reel_own_accounts() -> list:
+    return [str(a).strip() for a in config.get("luna_vale_accounts", []) if str(a).strip()]
+
+
+def _trial_reel_describe_wave(wave: dict) -> str:
+    """Eine Wellen-Zeile als Satz. Leere Zellen werden als 'nicht eingetragen'
+    benannt statt weggelassen — eine fehlende Zahl soll sichtbar fehlen."""
+    parts = [f"Welle {wave.get('wave') or '?'}"]
+    if wave.get("date"):
+        parts.append(f"gebrieft am {wave['date']}")
+    if wave.get("changed_variable"):
+        parts.append(f"geaenderte Variable: {wave['changed_variable']}")
+    if wave.get("raw_file_source"):
+        parts.append(f"Rohmaterial: {wave['raw_file_source']}")
+    if wave.get("video_link"):
+        parts.append(f"geposteter Link: {wave['video_link']}")
+        parts.append(f"Views nach 3h: {wave.get('views_after_3h') or 'nicht eingetragen'}")
+        parts.append(f"Account-Schnitt: {wave.get('account_avg') or 'nicht eingetragen'}")
+        parts.append(f"2x-Regel getroffen: {wave.get('hit_2x') or 'nicht eingetragen'}")
+        if wave.get("next_action"):
+            parts.append(f"naechster Schritt: {wave['next_action']}")
+    return " — ".join(parts)
+
+
+async def _tool_trial_reel_check(args: dict) -> str:
+    own = _trial_reel_own_accounts()
+    handle = (args.get("handle") or "").strip().lstrip("@")
+    if not handle:
+        return (
+            "ERROR: Kein Account angegeben. Trial-Reel-Wellen gibt es fuer unsere eigenen Accounts: "
+            + ", ".join(f"@{a}" for a in own) + "."
+        )
+    if handle.lower() not in [a.lower() for a in own]:
+        return (
+            f"ERROR: @{handle} ist keiner unserer eigenen Accounts ({', '.join('@' + a for a in own)}) "
+            "— Trial-Reel-Wellen gibt es nur dort. Bei einem fremden/Konkurrenz-Account kann ich nur "
+            "die oeffentlichen Zahlen der letzten Videos ansehen (video_analysis)."
+        )
+
+    now = datetime.now(ZoneInfo("Europe/Berlin")).strftime("%d.%m.%Y %H:%M")
+    lines = [f"Trial-Reel-Stand fuer @{handle} (Stand {now}):"]
+
+    # Die zwei Grenzen stehen ganz oben, nicht als Fussnote — sonst liest sich
+    # der Rest wie eine vollstaendige Antwort auf beide Fragen.
+    lines.append(
+        "GRENZE 1 — gepostet habe ICH nichts: ich poste auf keinem Account selbst. Laut "
+        "dokumentierter Rollenverteilung postet Ahmad, Jerome erstellt, ich briefe (scaling_log) "
+        "und werte aus. 'Habe ich ein Trial Reel gepostet' ist also mit Nein zu beantworten — die "
+        "Frage ist, ob eine von mir gebriefte Welle inzwischen von euch gepostet wurde."
+    )
+    lines.append(
+        "GRENZE 2 — Insights-Screenshot geht nicht: Reach, US-Audience-% und Interaktionsraten "
+        "zeigt Instagram nur INNERHALB des Accounts, in dem gepostet wurde. Mein Instagram-Login "
+        f"ist @{config.get('instagram_username') or '?'} (Ahmads privater Ansehen-Account), und auf "
+        "den echten Posting-Accounts wird bewusst nicht eingeloggt oder getippt (Ban-Risiko, feste "
+        "Grenze in claude_app_status.md). Ich liefere unten stattdessen: den Link, die oeffentlich "
+        "sichtbaren Zahlen mit einem Screenshot der oeffentlichen Post-Ansicht, und die "
+        "Insights-Zahlen, die schon im Sheet stehen. Keine geschaetzten Insights-Werte."
+    )
+
+    # 1) Dokumentierte Wellen
+    waves, waves_failed = [], False
+    try:
+        waves = await sheets_tools.read_trial_reel_waves(handle)
+    except Exception as e:
+        waves_failed = True
+        lines.append(
+            f"- Tab 'Trial Reel Waves' nicht lesbar ({e.__class__.__name__}: {e}) — was dort steht, "
+            "weiss ich gerade also nicht."
+        )
+    posted_waves = [w for w in waves if w.get("video_link")]
+    open_waves = [w for w in waves if not w.get("video_link")]
+    if waves:
+        lines.append("Dokumentierte Trial-Reel-Wellen (Sheet-Tab 'Trial Reel Waves'):")
+        for wave in posted_waves:
+            lines.append(f"- GEPOSTET: {_trial_reel_describe_wave(wave)}")
+        for wave in open_waves:
+            lines.append(
+                f"- OFFEN (Jerome gebrieft, noch kein geposteter Link eingetragen): "
+                f"{_trial_reel_describe_wave(wave)}"
+            )
+    elif not waves_failed:
+        lines.append(
+            f"- Fuer @{handle} steht keine Welle im Tab 'Trial Reel Waves' (oder der Tab war leer/"
+            "nicht lesbar — das kann ich von hier nicht unterscheiden). Dann ist entweder keine "
+            "Welle gebrieft worden (das macht scaling_log) oder sie wurde nicht eingetragen."
+        )
+
+    known_wave_links = {
+        instagram_tools.normalize_video_url(str(w["video_link"])): w.get("wave")
+        for w in posted_waves
+    }
+
+    # 2) Live-Blick aufs oeffentliche Profil
+    recent = await instagram_tools.get_recent_post_links(handle, limit=_TRIAL_REEL_RECENT_LIMIT)
+    recent_links = recent.get("links") or []
+    if recent.get("error"):
+        lines.append(
+            f"- Live-Blick auf das Profil fehlgeschlagen ({_trial_reel_short_error(recent['error'])}) — ob dort inzwischen "
+            "etwas Neues steht, weiss ich damit NICHT. Das ist kein 'es wurde nichts gepostet'."
+        )
+    elif not recent_links:
+        lines.append(
+            "- Auf dem oeffentlichen Profil finde ich gerade keine Beitraege (privat gestellt, "
+            "Instagram hat die Seite anders ausgeliefert, oder es ist wirklich nichts da)."
+        )
+    else:
+        lines.append("Neueste Beitraege live auf dem oeffentlichen Profil:")
+        for url in recent_links:
+            wave_no = known_wave_links.get(instagram_tools.normalize_video_url(url))
+            marker = (
+                f"= Trial Reel aus Welle {wave_no}" if wave_no is not None
+                else "keiner dokumentierten Welle zugeordnet"
+            )
+            lines.append(f"- {url} ({marker})")
+        lines.append(
+            "Wichtig: oeffentlich sieht ein Trial Reel aus wie jedes andere Reel — Instagram "
+            "markiert das nicht. Die Zuordnung oben kommt allein aus dem Sheet, nicht aus dem Profil."
+        )
+
+    # 3) Genau EINEN Post genauer ansehen (Screenshot + oeffentliche Zahlen)
+    target = (args.get("post_url") or "").strip()
+    target_note = "von dir genannter Link"
+    if target:
+        canonical = instagram_tools.canonical_post_url(target)
+        if not canonical:
+            lines.append(f"- '{target}' ist kein Instagram-Post/Reel-Link — dazu sehe ich mir nichts an.")
+            target = ""
+        else:
+            target = canonical
+    if not target and posted_waves:
+        target = str(posted_waves[-1]["video_link"])
+        target_note = f"geposteter Link der letzten dokumentierten Welle ({posted_waves[-1].get('wave')})"
+    if not target and recent_links:
+        target = recent_links[0]
+        target_note = "neuester Beitrag auf dem Profil — ob das ein Trial Reel ist, steht nicht fest"
+
+    if target:
+        stats = await instagram_tools.check_post_public_stats(target, ai, save_screenshot=True)
+        lines.append(f"Genauer angesehen ({target_note}): {target}")
+        if stats.get("raw"):
+            lines.append(f"- Oeffentliche Zahlen: {stats['raw']} (Stand {stats['timestamp']})")
+        if stats.get("error"):
+            lines.append(
+                f"- Zahlen nicht gelesen: {_trial_reel_short_error(stats['error'])} — hier wird "
+                "nichts geschaetzt."
+            )
+        if stats.get("screenshot_path"):
+            lines.append(
+                f"- Screenshot: {stats['screenshot_path']} — das ist die OEFFENTLICHE Post-Ansicht "
+                "(Views/Likes/Kommentare), NICHT das Insights-Panel. Sag das genau so, wenn du den "
+                "Screenshot weitergibst."
+            )
+        elif stats.get("screenshot_error"):
+            lines.append(
+                f"- Screenshot nicht gespeichert: {_trial_reel_short_error(stats['screenshot_error'])}."
+            )
+        elif not stats.get("error"):
+            lines.append("- Kein Screenshot entstanden.")
+    else:
+        lines.append(
+            "Kein Link, den ich mir ansehen koennte: weder ein von dir genannter, noch ein "
+            "eingetragener Wellen-Link, noch ein live gefundener Beitrag."
+        )
+
+    # 4) Insights-Zahlen, die schon irgendwo liegen
+    relevant = {instagram_tools.normalize_video_url(u) for u in recent_links}
+    relevant.update(known_wave_links.keys())
+    if target:
+        relevant.add(instagram_tools.normalize_video_url(target))
+
+    try:
+        pending = await sheets_tools.read_pending_insights_inbox()
+        hits = [p for p in pending if instagram_tools.normalize_video_url(p["link"]) in relevant]
+        if hits:
+            lines.append("Noch unverarbeitet im Tab 'Insights Eingang' (von Ahmad eingetragen):")
+            for p in hits:
+                lines.append(
+                    f"- {p['link']}: US-Audience={p.get('us_audience_raw') or 'leer'}, "
+                    f"Reach={p.get('reach_raw') or 'leer'}, Views={p.get('views_raw') or 'leer'} "
+                    f"(Zeile {p['row']} — wird beim naechsten Hintergrund-Durchlauf verarbeitet)"
+                )
+    except Exception as e:
+        lines.append(f"- Tab 'Insights Eingang' nicht lesbar ({e.__class__.__name__}: {e}).")
+
+    try:
+        tracked = await sheets_tools.read_winner_tracking(account=handle)
+        hits = [
+            r for r in tracked
+            if not r.get("error") and r.get("video_link")
+            and instagram_tools.normalize_video_url(str(r["video_link"])) in relevant
+        ]
+        if hits:
+            lines.append("Schon im Winner Tracking erfasst:")
+            for r in hits:
+                lines.append(
+                    f"- {r['video_link']}: Views={r.get('views') or 'leer'}, "
+                    f"US-Audience={r.get('us_audience_pct') or 'leer'}, "
+                    f"Outlier={r.get('outlier') or 'leer'}, Decision={r.get('decision') or 'leer'}"
+                )
+    except Exception as e:
+        lines.append(f"- Winner Tracking nicht lesbar ({e.__class__.__name__}: {e}).")
+
+    # 5) Wie die fehlenden Insights-Zahlen wirklich hereinkommen (aktueller
+    #    Workflow — der alte WhatsApp-Screenshot-Weg wird bewusst NICHT genannt)
+    lines.append(
+        "Fehlende Insights-Zahlen: bei Trial Reels exakt 3 Stunden nach dem Posten in Instagram "
+        "ablesen (Ahmad hat den Zugriff, ich nicht) und Link + US-Audience-% + Reach + Views direkt "
+        "in den Sheet-Tab 'Insights Eingang' eintragen, eine Zeile pro Video. Ich pruefe den Tab "
+        "auf eigenem Takt, werte die 2x-Regel aus, trage das Ergebnis in die Welle ein und briefe "
+        "Jerome — du musst mir danach nichts mehr sagen."
+    )
+    if open_waves and recent_links and not any(
+        instagram_tools.normalize_video_url(u) in known_wave_links for u in recent_links
+    ):
+        lines.append(
+            f"Auffaellig: Welle {open_waves[-1].get('wave')} ist offen, und die neuesten Beitraege "
+            "sind keiner Welle zugeordnet — einer davon ist sehr wahrscheinlich das Ergebnis. "
+            "Sobald seine Zahlen im 'Insights Eingang' stehen, ordne ich ihn automatisch zu. Raten "
+            "tue ich hier nicht, welcher es ist."
+        )
+    return "\n".join(lines)
+
+
 # --- Batch: Rest (OpenApp / Claude Code / Fanplace / SLT.bio / Remember) ---
 
 async def _tool_open_app(args: dict) -> str:
@@ -3057,6 +3315,42 @@ TOOL_REGISTRY: dict = {
         slow=True,
         verbose_reply=True,
     ),
+    "trial_reel_check": ToolSpec(
+        schema={
+            "name": "trial_reel_check",
+            "description": (
+                "Nutzen bei Fragen wie 'ist auf @lunaxvale ein Trial Reel gepostet worden?', 'wie "
+                "steht die Trial-Reel-Welle?', 'schick mir den Link/die Zahlen dazu'. Zieht fuer EINEN "
+                "eigenen Account zusammen: die dokumentierten Trial-Reel-Wellen aus dem Sheet-Tab "
+                "'Trial Reel Waves' (welche offen ist, welche schon einen geposteten Link + 2x-Ergebnis "
+                "hat), einen LIVE-Blick auf die neuesten Beitraege des oeffentlichen Profils mit "
+                "Zuordnung zu den Wellen, die oeffentlichen Zahlen (Views/Likes/Kommentare) EINES "
+                "Posts samt gespeichertem Screenshot, und die Insights-Zahlen die schon im Sheet "
+                "stehen. WICHTIG: einen echten INSIGHTS-Screenshot (Reach, US-Audience-%) kann das "
+                "Werkzeug nicht liefern — die sieht nur wer im Posting-Account eingeloggt ist, und "
+                "genau das passiert bewusst nicht. Gib die Grenzen aus dem Ergebnis unveraendert "
+                "weiter und nenne NIEMALS selbst eine Insights-Zahl, die nicht im Ergebnis steht."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "handle": {
+                        "type": "string",
+                        "description": "Eigener Account ohne @ (z.B. lunaxvale).",
+                    },
+                    "post_url": {
+                        "type": "string",
+                        "description": "Optional, konkreter Post/Reel-Link, den Ahmad meint — dann wird genau der angesehen.",
+                    },
+                },
+                "required": ["handle"],
+            },
+        },
+        handler=_tool_trial_reel_check,
+        speak_result=True,
+        slow=True,
+        verbose_reply=True,
+    ),
 
     # --- Batch: Rest ---
     "open_app": ToolSpec(
@@ -3348,6 +3642,7 @@ SLOW_TOOL_FILLERS = {
     "browser_extract": "Ich werte die Seite strukturiert aus.",
     "flight_search": "Ich hole die aktuellen Flugpreise, einen Moment.",
     "video_analysis": "Ich schaue mir die letzten Videos an.",
+    "trial_reel_check": "Ich schaue nach, was zu dem Trial Reel wirklich vorliegt.",
     "gmail_check": "Ich schaue kurz ins Postfach.",
     "whatsapp_check": "Ich schaue kurz bei WhatsApp nach.",
     "read_chat": "Ich schaue kurz im Chat nach.",
