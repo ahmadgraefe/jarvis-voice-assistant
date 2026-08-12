@@ -1440,7 +1440,12 @@ async def _determine_virality_factor(client: anthropic.AsyncAnthropic, account: 
     material for Claude, never shown to Jerome directly."""
     knowledge = _get_luna_vale_knowledge()
     video_link = row.get("video_link", "")
-    deep = await instagram_tools.analyze_video_deep(video_link, client) if video_link else {"error": "kein Link"}
+    # Nur 3 statt der vollen 6 Standard-Frames (Ahmad, 2026-08-12: Token-
+    # Verbrauch klein halten) -- Hook/Transition/Pacing lassen sich aus
+    # Start/Mitte/spaeter Punkt noch gut ablesen, reel_analysis (das
+    # ausdruecklich vom Nutzer angestossene Werkzeug fuer eine tiefere,
+    # einmalige Einzelanalyse) behaelt die vollen 6 Frames als Default.
+    deep = await instagram_tools.analyze_video_deep(video_link, client, timestamps=(0, 2, 5)) if video_link else {"error": "kein Link"}
     if deep.get("error"):
         _log(f"_determine_virality_factor: Video-Analyse fehlgeschlagen fuer {video_link}: {deep['error']} — falle auf Zahlen-Reasoning zurueck.")
         video_context = "(Video konnte nicht direkt analysiert werden — nur Sheet-Zahlen verfuegbar.)"
