@@ -1484,11 +1484,26 @@ async def _determine_virality_factor(client: anthropic.AsyncAnthropic, account: 
         return {"virality_factor": "Could not be determined clearly", "next_step": "Manual review needed"}
 
 
+TRIAL_REEL_MAX_PER_RUN = 2  # siehe Kommentar unten (Timeout + Jerome-Kapazitaet)
+
+
 async def trial_reel_pass(config: dict):
     """Scan Winner Tracking (only Luna Vale's own accounts — Trial Reels
     are about Ahmad's content, not competitors') for videos the sheet
     already flagged KEEP or Outlier, and that haven't been sent to Jerome
-    yet. For each: reason about why it worked, log it, message Jerome."""
+    yet. For each: reason about why it worked, log it, message Jerome.
+
+    Max. TRIAL_REEL_MAX_PER_RUN neue Kandidaten pro Lauf (2026-08-12, nach
+    einem echten Timeout live beobachtet: 'Trial-Reel-Scan hat nicht
+    reagiert') -- seit _determine_virality_factor eine echte Video-Analyse
+    macht (Playwright, mehrere Sekunden pro Video), sprengt ein grosser
+    Rueckstau an neuen Kandidaten locker die 180s-Standard-Timeout, vor
+    allem direkt nach der Winner-Kriterien-Migration (61 Zeilen auf einen
+    Schlag neu bewertet). Nicht bearbeitete Kandidaten bleiben eligible und
+    unnotified, werden also beim naechsten Tick (60s) automatisch
+    weiterbearbeitet -- kein Kandidat geht verloren, nur zeitlich gestreckt.
+    Nebeneffekt, auch gewollt: verhindert dass Jerome in einer Minute eine
+    Flut von Trial-Reel-Nachrichten bekommt statt einer gestreckten Folge."""
     accounts = config.get("luna_vale_accounts", [])
     if not accounts:
         return
@@ -1498,8 +1513,12 @@ async def trial_reel_pass(config: dict):
     delivered = 0
     try:
         for account in accounts:
+            if candidates_found >= TRIAL_REEL_MAX_PER_RUN:
+                break
             rows = await sheets_tools.read_winner_tracking(account=account, limit=20)
             for row in rows:
+                if candidates_found >= TRIAL_REEL_MAX_PER_RUN:
+                    break
                 if row.get("error") or not row.get("video_link"):
                     continue
                 decision = str(row.get("decision") or "").upper()
@@ -1525,9 +1544,12 @@ async def trial_reel_pass(config: dict):
 
                 candidates_found += 1
                 verdict = await _determine_virality_factor(client, account, row)
+                # Ahmad (2026-08-12): keine extra Update-Meldung an ihn mehr,
+                # wenn Jarvis Jerome schreibt -- die WhatsApp-Nachricht an
+                # Jerome sieht er ohnehin direkt, eine zusaetzliche Meldung
+                # war reine Redundanz.
                 result = await jerome_comm.handle_trial_reel_candidate(
                     account, row["video_link"], verdict["virality_factor"], verdict["next_step"],
-                    notify_ahmad_fn=lambda text: _alert(config, text),
                 )
                 _log(f"Trial-Reel-Kandidat @{account}: {result}")
                 # handle_trial_reel_candidate only marks a video notified on
@@ -1538,7 +1560,7 @@ async def trial_reel_pass(config: dict):
     finally:
         await client.close()
 
-    _log(f"Trial-Reel-Scan fertig: {candidates_found} Kandidat(en) gefunden, {delivered} tatsaechlich an Jerome zugestellt.")
+    _log(f"Trial-Reel-Scan fertig: {candidates_found} Kandidat(en) bearbeitet (Limit {TRIAL_REEL_MAX_PER_RUN}/Lauf), {delivered} tatsaechlich an Jerome zugestellt.")
 
 
 TRIAL_WAVE_NUDGE_HOURS = 8  # don't ask before Jerome realistically had time to shoot+post it
@@ -2559,7 +2581,8 @@ async def content_brief_pass(config: dict):
         return
 
     memory.mark_content_brief_done()
-    await _alert(config, f"Jarvis: heutiger Content-Brief an Jerome raus — {result}")
+    # Ahmad (2026-08-12): keine extra Update-Meldung an ihn mehr, wenn Jarvis
+    # Jerome schreibt -- er sieht die WhatsApp-Nachricht an Jerome ohnehin direkt.
     _log(f"Content-Brief gesendet: {result}")
 
 
@@ -2604,7 +2627,8 @@ async def competitor_content_scan_pass(config: dict):
         return
 
     _save_timer("competitor_scan", time.time())
-    await _alert(config, f"Jarvis: woechentliche Konkurrenz-Inspiration an Jerome raus — {result}")
+    # Ahmad (2026-08-12): keine extra Update-Meldung an ihn mehr, wenn Jarvis
+    # Jerome schreibt -- er sieht die WhatsApp-Nachricht an Jerome ohnehin direkt.
     _log(f"Konkurrenz-Scan gesendet: {result}")
 
 
@@ -3075,7 +3099,7 @@ async def main():
             # video_analysis.jsonl-Daten -- laeuft weiter, findet ueber die Zeit
             # aber weniger/keine neuen Kandidaten mehr.
 
-            await _run_pass_safely("Trial-Reel-Scan", config, trial_reel_pass(config))
+            await _run_pass_safely("Trial-Reel-Scan", config, trial_reel_pass(config), timeout=300)
             await _run_pass_safely("Trial-Reel-Nachfrage", config, trial_wave_nudge_pass(config))
 
             last_business = now
