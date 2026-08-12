@@ -134,6 +134,9 @@ PASS_TIMEOUT_SECONDS = 180
 
 CREDIT_ALERT_COOLDOWN_SECONDS = 6 * 3600  # one clear heads-up per ~6h while the issue persists, not every tick
 
+WATCHDOG_ALERT_COOLDOWN_SECONDS = 24 * 3600  # Ahmad, 2026-08-12: "brauche die Mitteilung nicht so oft" --
+# hoechstens 1x/Tag pro Pass-Label, nicht bei jedem stuendlichen Retry-Versuch erneut.
+
 # _run_health_check zaehlt wiederkehrende Fehler ueber 24h, meldet sie aber nur,
 # wenn der letzte Vorfall hoechstens so lange her ist. Ohne diese Schranke war
 # die Meldung "wiederholen sich trotz Self-Improve" nach JEDEM erfolgreichen Fix
@@ -2777,7 +2780,19 @@ async def _run_pass_safely(label: str, config: dict, coro, timeout: int = PASS_T
             except Exception:
                 pass
             _log(f"WATCHDOG: Browser-Sitzungen wegen '{label}' zurueckgesetzt.")
-        await _alert(config, f"⚠️ Jarvis: Hintergrund-Aufgabe '{label}' hat nicht reagiert und wurde abgebrochen.")
+        # Ahmad, 2026-08-12: "brauche die Mitteilung nicht so oft" -- ohne
+        # Sperre alarmierte ein Pass, der wiederholt am selben Zeitbudget
+        # scheitert (stuendlicher Retry), jede Stunde erneut mit derselben,
+        # bereits bekannten Meldung. Hoechstens 1x/Tag PRO Pass-Label, nicht
+        # global -- ein zweiter, andersartiger Haenger am selben Tag soll
+        # trotzdem durchkommen.
+        watchdog_key = f"watchdog_alert_{label}"
+        timers = _load_timers()
+        if time.time() - timers.get(watchdog_key, 0) >= WATCHDOG_ALERT_COOLDOWN_SECONDS:
+            _save_timer(watchdog_key, time.time())
+            await _alert(config, f"⚠️ Jarvis: Hintergrund-Aufgabe '{label}' hat nicht reagiert und wurde abgebrochen.")
+        else:
+            _log(f"WATCHDOG: Alarm fuer '{label}' unterdrueckt (schon innerhalb der letzten {WATCHDOG_ALERT_COOLDOWN_SECONDS // 3600}h gemeldet).")
     except Exception as e:
         outcome = "error"
         _log(f"FEHLER bei {label}: {_exc(e)}")
@@ -2918,7 +2933,15 @@ async def main():
 
         await _run_pass_safely("Tages-Zusammenfassung", config, daily_summary_pass(config))
         await _run_pass_safely("Morgen-Briefing", config, morning_briefing_pass(config))
-        await _run_pass_safely("Content-Brief", config, content_brief_pass(config))
+        # 2026-08-12: Ahmad meldete live wiederholte "hat nicht reagiert"-Alarme.
+        # Kein echter Haenger -- build_daily_content_brief scannt inzwischen 5
+        # statt 3 Accounts (lunas.crypt/succubuslunavale kamen dazu), jeweils
+        # mit mehreren Hashtag-Suchen + eingebauten 2s-Pausen zwischen ihnen.
+        # Das brauchte laenger als der Standard-Timeout (180s) zulaesst, wurde
+        # darum jede Stunde erneut abgebrochen und alarmiert. Explizites,
+        # grosszuegiges Zeitbudget, gleiches Prinzip wie self_improve/
+        # skill_growth (timeout=650).
+        await _run_pass_safely("Content-Brief", config, content_brief_pass(config), timeout=600)
         await _run_pass_safely("Instagram-Insights", config, instagram_insights_pass(config), timeout=300)
 
         # Recherche laeuft bewusst auf ihrem EIGENEN, langsameren Takt (1-2x/Tag,
