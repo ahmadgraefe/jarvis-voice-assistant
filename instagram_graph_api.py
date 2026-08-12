@@ -23,6 +23,7 @@ oeffentliche API NICHT verfuegbar -- diese eine Zahl bleibt weiter Sache des
 alten Screenshot-Verfahrens.
 """
 
+import asyncio
 import json
 import os
 import time
@@ -36,7 +37,13 @@ LOG_PATH = (
     "/var/log/jarvis-igapi.log" if os.environ.get("JARVIS_ROLE") == "server"
     else os.path.expanduser("~/Library/Logs/jarvis-igapi.log")
 )
-BASE_URL = "https://graph.facebook.com/v21.0"
+BASE_URL = "https://graph.instagram.com"
+# 2026-08-12, echter Fehler live gefunden: "IGAA..."-Tokens ("Instagram API
+# with Instagram Login") laufen ueber DIESEN Host, nicht graph.facebook.com/vXX
+# (klassische Facebook-Graph-API via verknuepfter Seite). Erste Version
+# dieses Moduls nutzte faelschlich graph.facebook.com -- alle vier Tokens
+# waren die ganze Zeit gueltig, das war der tatsaechliche Fehler, nicht die
+# Tokens. Ahmad hat das selbst gefunden und korrigiert.
 INSIGHTS_METRICS = "views,likes,comments,reach,saved,shares"
 
 # Meta-Fehlercodes, die nur Ahmad selbst loesen kann (Token nicht
@@ -137,6 +144,7 @@ async def get_recent_reels(user_id: str, access_token: str, days: int = 30) -> d
         next_url = (result.get("paging") or {}).get("next")
         if not next_url:
             break
+        await asyncio.sleep(1)  # kurzer Abstand vor der naechsten Seite, siehe background_brain.py-Kommentar
         path, params, absolute = next_url, None, True
 
     return {"priority": priority, "rest": rest}

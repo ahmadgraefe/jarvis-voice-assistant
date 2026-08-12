@@ -2545,6 +2545,12 @@ async def _instagram_insights_for_account(handle: str, acc: dict) -> dict:
         if not media_id or not permalink:
             continue
         insights_result = await instagram_graph_api.get_reel_insights(media_id, token)
+        await asyncio.sleep(1)  # 2026-08-12, live beobachtet: viele Insights-Calls direkt
+        # hintereinander (7 Reels = 7 Calls) haben transiente "Failed to decrypt"/
+        # "Invalid OAuth 2.0 Access Token"-Fehler bei GENAU dem NAECHSTEN Account
+        # ausgeloest, obwohl der Token nachweislich gueltig war (direkt danach erneut
+        # getestet, sofort wieder ok) -- sieht nach Meta-seitigem Rate-Limiting aus,
+        # keine Robustheitsluecke im Code selbst.
         if "error" in insights_result:
             continue  # einzelner Reel-Fehler blockiert nicht die anderen
 
@@ -2637,6 +2643,7 @@ async def instagram_insights_pass(config: dict):
         _save_timer(acc_retry_key, time.time())
 
         result = await _instagram_insights_for_account(handle, acc)
+        await asyncio.sleep(2)  # kurzer Abstand zwischen Accounts, siehe Kommentar oben zum Rate-Limiting
         if result["ok"]:
             any_account_succeeded = True
             total_processed += result["reels_processed"]
