@@ -114,6 +114,7 @@ import push_notifications
 import habit_tracker
 import finance_tracker
 import flight_prices
+import proxy_tools
 
 LUNA_VALE_STATUS_PATH = os.path.join(os.path.dirname(__file__), "claude_app_status.md")
 
@@ -6110,6 +6111,14 @@ async def api_cockpit():
         slt = None
         print(f"  Cockpit: slt.bio-Abruf fehlgeschlagen: {e}", flush=True)
 
+    try:
+        infrastruktur = await proxy_tools.get_proxies_for_cockpit()
+        if "error" in infrastruktur:
+            infrastruktur = None
+    except Exception as e:
+        infrastruktur = None
+        print(f"  Cockpit: Proxy-Abruf fehlgeschlagen: {e}", flush=True)
+
     goals = _goals_for_cockpit()
     habits = habit_tracker.get_habits_with_status()
     funnel = {"fanplace": _fanplace_for_cockpit() or None, "slt": slt}
@@ -6135,6 +6144,7 @@ async def api_cockpit():
         "habits": habits,
         "meals": memory.get_recent_meals(days=1),
         "health": memory.get_latest_health(),
+        "infrastruktur": infrastruktur,
         "nudge": nudge,
     })
 

@@ -197,6 +197,27 @@ function renderHealth(data) {
   }).join("");
 }
 
+function renderInfrastruktur(data) {
+  const infra = data.infrastruktur;
+  const kpiEl = document.getElementById("infraKpis");
+  const listEl = document.getElementById("infraList");
+  if (!infra) {
+    kpiEl.innerHTML = "";
+    listEl.innerHTML = emptyState("server", "Proxy-Daten aktuell nicht abrufbar.");
+    return;
+  }
+  kpiEl.innerHTML = kpiCard("wallet", "Proxy-Cheap Guthaben", fmtEur(infra.balance), "€", null, "flat", "minus");
+  listEl.innerHTML = infra.proxies.length
+    ? infra.proxies.map((p) => rowHtml(
+        p.status === "ACTIVE" ? "var(--color-ok)" : "var(--color-warn)",
+        p.account_label ? `@${p.account_label}` : "kein Account zugeordnet",
+        `${p.public_ip} &middot; ${p.isp_name || "unbekannter ISP"} &middot; bis ${(p.expires_at || "").slice(0, 10) || "?"}`,
+        fmt(p.bandwidth_used_gb), "GB",
+        `<span class="badge ${p.status === "ACTIVE" ? "badge-ok" : "badge-warn"}">${p.status || "?"}</span>`
+      )).join("")
+    : emptyState("server", "Keine Proxies gefunden.");
+}
+
 async function loadCockpit() {
   const dot = document.getElementById("syncDot");
   const label = document.getElementById("syncLabel");
@@ -213,6 +234,7 @@ async function loadCockpit() {
     renderHabits(data);
     renderMeals(data);
     renderHealth(data);
+    renderInfrastruktur(data);
 
     dot.style.background = "var(--color-ok)";
     label.textContent = "live · " + data.generated_at;

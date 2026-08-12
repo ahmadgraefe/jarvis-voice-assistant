@@ -833,6 +833,35 @@ def mark_morning_briefing_done():
         json.dump(state, f)
 
 
+def has_instagram_insights_run_today(slot: str, today: str) -> bool:
+    """Gleiches Muster wie has_content_brief_today(), aber mit ZWEI moeglichen
+    Slots pro Tag (morning/evening) und `today` bewusst als Parameter statt
+    intern per time.strftime() berechnet -- der Aufrufer (background_brain.py)
+    ermittelt das Datum ueber ZoneInfo("Europe/Berlin"), weil auf dem Server
+    time.strftime() die (vermutlich UTC-)Systemzeit waere, nicht Berlin-Zeit."""
+    if not os.path.exists(BRIEFING_STATE_PATH):
+        return False
+    try:
+        with open(BRIEFING_STATE_PATH) as f:
+            state = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return False
+    return state.get(f"last_instagram_insights_{slot}_date") == today
+
+
+def mark_instagram_insights_done(slot: str, today: str):
+    state = {}
+    if os.path.exists(BRIEFING_STATE_PATH):
+        try:
+            with open(BRIEFING_STATE_PATH) as f:
+                state = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            state = {}
+    state[f"last_instagram_insights_{slot}_date"] = today
+    with open(BRIEFING_STATE_PATH, "w") as f:
+        json.dump(state, f)
+
+
 def has_content_brief_today() -> bool:
     if not os.path.exists(BRIEFING_STATE_PATH):
         return False
