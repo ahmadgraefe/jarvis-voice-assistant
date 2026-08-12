@@ -1420,21 +1420,49 @@ async def skill_growth_pass(config: dict):
 
 async def _determine_virality_factor(client: anthropic.AsyncAnthropic, account: str, row: dict) -> dict:
     """One Claude call, informed by the ALREADY-documented business patterns
-    (debate-hook videos outperform, etc.) — never a fresh guess, always
-    grounded in what's already known to work for this business.
+    (debate-hook videos outperform, etc.) AND, since 2026-08-12, a real
+    multi-frame look at THIS specific video (instagram_tools.analyze_video_deep)
+    — never a fresh guess, always grounded in what's already known to work
+    for this business AND in what's actually in the winning video.
+
+    Ahmad (2026-08-12): Jarvis has to actually understand the video, not just
+    react to numbers, to tell Jerome specifically what to change and why.
+    Cost-safe by construction: trial_reel_pass only reaches this for videos
+    that already passed the Winner-criteria gate (small, pre-filtered set),
+    and already_notified() means each video is deep-analyzed at most once
+    ever — same bounded-scope reasoning that let analyze_video_deep exist in
+    the first place ("a small, weekly set of already-confirmed winners, not
+    routine checks"), unlike the disabled routine-sweep video_analysis_pass.
 
     Output MUST be English — this text goes straight into Jerome's WhatsApp
     message and he doesn't speak German (documented in the workbook itself).
     The business-knowledge INPUT can stay German, that's just reasoning
     material for Claude, never shown to Jerome directly."""
     knowledge = _get_luna_vale_knowledge()
+    video_link = row.get("video_link", "")
+    deep = await instagram_tools.analyze_video_deep(video_link, client) if video_link else {"error": "kein Link"}
+    if deep.get("error"):
+        _log(f"_determine_virality_factor: Video-Analyse fehlgeschlagen fuer {video_link}: {deep['error']} — falle auf Zahlen-Reasoning zurueck.")
+        video_context = "(Video konnte nicht direkt analysiert werden — nur Sheet-Zahlen verfuegbar.)"
+    else:
+        video_context = (
+            f"Real structural analysis of THIS video (multi-frame):\n"
+            f"- Hook (first 1-2s): {deep.get('hook_timing', 'unbekannt')}\n"
+            f"- Transition/Outfit change: {deep.get('transition', 'unbekannt')}\n"
+            f"- Pacing: {deep.get('pacing', 'unbekannt')}\n"
+            f"- Structural summary: {deep.get('structure_summary', 'unbekannt')}"
+        )
     prompt = (
         f"Business knowledge (German, for your context only):\n{knowledge}\n\n"
-        f"A video from @{account} has this status in the Winner Tracking sheet: {json.dumps(row, ensure_ascii=False)}.\n"
-        "Based on the documented business patterns (e.g. which hook types are proven to perform "
-        "better): identify in ONE sentence WHAT is likely responsible for this video's success "
-        "(virality_factor), and in ONE sentence a CONCRETE, clear Trial Reel instruction for the "
-        "editor (next_step) — exactly ONE variable should change per Trial Reel. "
+        f"A video from @{account} has this status in the Winner Tracking sheet: {json.dumps(row, ensure_ascii=False)}.\n\n"
+        f"{video_context}\n\n"
+        "Combine BOTH the documented business patterns AND the actual structural analysis above "
+        "(when available) to identify in ONE sentence WHAT is likely responsible for this "
+        "SPECIFIC video's success (virality_factor — be concrete, reference the actual hook/"
+        "transition/pacing where you have it, not just a generic pattern), and in ONE sentence a "
+        "CONCRETE, clear Trial Reel instruction for the editor (next_step) — exactly ONE variable "
+        "should change per Trial Reel, and it must be something the editor can literally act on "
+        "(e.g. a specific outfit, a specific line, a specific cut timing), not a vague theme. "
         "IMPORTANT: answer in ENGLISH — the editor (Jerome) does not speak German. "
         'Respond ONLY as JSON: {"virality_factor": "...", "next_step": "..."}'
     )
