@@ -66,9 +66,10 @@ JARVIS_LOGS = [
 ]
 LOG_PATH = os.path.join(_LOG_DIR, "jarvis-brain.log")
 
-INSTAGRAM_INTERVAL_SECONDS = 4 * 60 * 60      # Ahmad, 2026-08-11: 90min (16x/Tag ueber 21
-# Accounts) war zu viel -- 6x/Tag reicht fuer Follower-Trend + Fanplace-Churn-Check locker,
-# senkt gleichzeitig unnoetig haeufige automatisierte Profil-Besuche (Ban-Risiko-Reduktion).
+INSTAGRAM_INTERVAL_SECONDS = 24 * 60 * 60     # Ahmad, 2026-08-12: weiter reduziert, war 4h (6x/Tag).
+# Kein reiner Kostentreiber (check_profile liest Follower-Zahlen per Text-Parsing aus der Seite,
+# keine Vision/Claude-Aufrufe) -- Ahmad wollte es trotzdem einfacher: 1x taeglich reicht. Teilt sich
+# den Takt mit Fanplace-Check (siehe unten im Loop) -- laeuft dadurch jetzt ebenfalls nur noch 1x/Tag.
 BUSINESS_CYCLE_INTERVAL_SECONDS = 5 * 60 * 60  # discovery/sheet-sync/video-analysis/trial-reel
 RESEARCH_INTERVAL_SECONDS = 12 * 60 * 60      # Ahmad wants 1-2 research WhatsApp updates/day, not 4-6
 SELF_IMPROVE_INTERVAL_SECONDS = 2 * 24 * 60 * 60  # Ahmad, 2026-08-12: Kostenreduktion, war 30min (48x/Tag) —
