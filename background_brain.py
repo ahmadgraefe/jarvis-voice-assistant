@@ -2572,9 +2572,17 @@ async def _run_pass_safely(label: str, config: dict, coro, timeout: int = PASS_T
     mitten in einer Datei-Aenderung) mit SIGABRT gekillt, obwohl gar kein
     echter Haenger vorlag. Jetzt hier statt nur am Tick-Ende, damit ein
     einzelner langsamer Pass den naechsten nicht verpasst."""
+    # Handlungsprotokoll (2026-08-12): jeder Durchlauf hier ist eine Handlung,
+    # die Jarvis OHNE Ahmads Zutun gemacht hat. Bisher stand davon nichts in
+    # einem Gedaechtnis, das ein Werkzeug lesen kann (nur in dieser Log-Datei)
+    # — deshalb konnte Jarvis auf "hast du gestern X getan?" nichts belegen.
+    # Absichtlich hier an der einen Sammelstelle statt in jedem Pass einzeln,
+    # damit ein neuer Pass automatisch mitprotokolliert wird.
+    outcome = "ok"
     try:
         return await asyncio.wait_for(coro, timeout=timeout)
     except asyncio.TimeoutError:
+        outcome = "timeout"
         _log(f"WATCHDOG: '{label}' hat nach {timeout}s nicht reagiert, abgebrochen.")
         if label in _BROWSER_RESET_PASSES:
             try:
@@ -2588,8 +2596,16 @@ async def _run_pass_safely(label: str, config: dict, coro, timeout: int = PASS_T
             _log(f"WATCHDOG: Browser-Sitzungen wegen '{label}' zurueckgesetzt.")
         await _alert(config, f"⚠️ Jarvis: Hintergrund-Aufgabe '{label}' hat nicht reagiert und wurde abgebrochen.")
     except Exception as e:
+        outcome = "error"
         _log(f"FEHLER bei {label}: {_exc(e)}")
     finally:
+        memory.add_action_entry(
+            "hintergrund_durchlauf",
+            target=label,
+            detail=f"autonomer Durchlauf '{label}'",
+            outcome=outcome,
+            initiator="autonom",
+        )
         _sd_notify("WATCHDOG=1")
     return None
 

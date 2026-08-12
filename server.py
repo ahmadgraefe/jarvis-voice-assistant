@@ -1962,6 +1962,34 @@ async def _tool_post_author_check(args: dict) -> str:
         lines.append("Was in meinem Langzeitgedaechtnis zum Posten steht:")
         lines.extend(hints[:6])
 
+    # Die dritte Moeglichkeit, die hier bisher fehlte: war es JARVIS? Seit
+    # 2026-08-12 gibt es dafuer einen Beleg statt einer Beteuerung — das
+    # Handlungsprotokoll (own_action_check).
+    since, until = _own_action_day_window(day)
+    journal_start = memory.get_action_journal_start()
+    own_entries = memory.get_action_entries(since, until)
+    own_publish = _own_action_publish_entries(own_entries)
+    if own_publish:
+        lines.append(
+            "War es ich selbst? Das laesst sich hier NICHT ausschliessen — in meinem "
+            "Handlungsprotokoll steht an dem Tag: "
+            + "; ".join(f"{e.get('timestamp')} {e.get('action')}" for e in own_publish[:5])
+            + ". Bitte mit own_action_check ansehen, bevor irgendwer anders genannt wird."
+        )
+    elif not journal_start:
+        lines.append(
+            "War es ich selbst? Mein Handlungsprotokoll hat fuer diesen Tag keinen Eintrag (es wird "
+            "erst seit 12.08.2026 gefuehrt), belegen kann ich daraus also nichts. Ein Werkzeug zum "
+            "Veroeffentlichen habe ich aber gar nicht — den vollen Befund zeigt own_action_check."
+        )
+    else:
+        lines.append(
+            f"War es ich selbst? Im Protokoll stehen fuer den Tag {len(own_entries)} eigene "
+            f"Handlung(en) (Protokollbeginn {journal_start}) und keine davon sieht nach einer "
+            "Veroeffentlichung aus; ein Posting-Werkzeug habe ich auch nicht. Den vollen Befund "
+            "(Login-/Code-Stand, Abdeckungsgrenzen) zeigt own_action_check."
+        )
+
     lines.append(
         f"Fazit: Ich kann nicht belegen, wer von {who} am {day_label} gepostet hat, und erfinde "
         "dazu nichts. Wenn die Notizen oben eindeutig sind (z.B. 'nur Ahmad postet'), dann nenn das "
@@ -2232,6 +2260,363 @@ async def _tool_trial_reel_check(args: dict) -> str:
             "sind keiner Welle zugeordnet — einer davon ist sehr wahrscheinlich das Ergebnis. "
             "Sobald seine Zahlen im 'Insights Eingang' stehen, ordne ich ihn automatisch zu. Raten "
             "tue ich hier nicht, welcher es ist."
+        )
+    return "\n".join(lines)
+
+
+# --- Eigenes Handlungsprotokoll: "war das ich?" ------------------------------
+# Ahmad, 2026-08-12: er fragte, ob JARVIS SELBST am Tag davor ein Trial Reel
+# gepostet hatte oder Jerome. Darauf gab es keine belegte Antwort — nicht weil
+# die Frage schwer ist, sondern weil Jarvis ueber seine EIGENEN vergangenen
+# Handlungen kein Gedaechtnis hatte: Werkzeug-Aufrufe verschwanden mit dem
+# Chat-Verlauf, autonome Hintergrund-Durchlaeufe standen nur in einer Log-
+# Datei, die kein Werkzeug lesen konnte. post_author_check konnte deshalb nur
+# ueber Ahmad vs. Jerome reden und die dritte Moeglichkeit ("war es Jarvis?")
+# gar nicht pruefen.
+#
+# Dieses Werkzeug schliesst genau diese Luecke, mit Belegen statt Gefuehl:
+#   1. das Protokoll des Tages (memory.add_action_entry wird an drei Stellen
+#      geschrieben: _run_tool hier, _run_pass_safely in background_brain.py,
+#      die beiden Jerome-Sender in jerome_comm.py),
+#   2. wie weit das Protokoll ueberhaupt zurueckreicht — fehlende Eintraege
+#      sind KEIN Beleg dafuer, dass nichts passiert ist,
+#   3. ob Jarvis eine Veroeffentlichung technisch ueberhaupt haette
+#      ausloesen koennen (eingeloggter Instagram-Account vs. die echten
+#      Posting-Accounts, Code-Scan von instagram_tools nach Post-Funktionen),
+#   4. die live gelesenen festen Grenzen aus claude_app_status.md.
+#
+# Ausdruecklich NICHT gebaut: eigenstaendiges Posten/Kommentieren/Liken auf
+# den echten Accounts. Das ist keine fehlende Umsetzung, sondern eine bewusst
+# dokumentierte Grenze (feste Grenzen 2 + 5, Ban-Risiko bei automatisierten
+# Eingabemustern) — und ein Bestaetigungs-Gate waere dafuer das falsche
+# Mittel: es fragt "hat Ahmad das schon einmal erlaubt?", nicht "ist das
+# ueberhaupt erlaubt?". Solange die Grenze gilt, bleibt die ehrliche Antwort
+# auf "hast du gepostet?": nein, und ich koennte es auch nicht.
+#
+# Rein lesend, plus optional ein Eintrag in eine lokale Datei — nichts davon
+# ist nach aussen sichtbar, deshalb bewusst KEIN Bestaetigungs-Gate.
+
+_ACTION_ARG_TARGET_KEYS = ("recipient", "contact", "handle", "account", "app_name", "title", "url", "name")
+_ACTION_JOURNAL_MAX_LISTED = 25  # einzeln aufgefuehrte Eintraege, Rest wird gezaehlt
+
+# Funktionsnamen in instagram_tools, die etwas VEROEFFENTLICHEN wuerden. Als
+# Praefix-Muster, damit reine Lese-Helfer nicht faelschlich anschlagen
+# (canonical_post_url/normalize_video_url enthalten 'post'/'video', tun aber
+# nichts). Kommt hier je etwas dazu, aendert sich die Antwort automatisch.
+_ACTION_PUBLISH_FUNC_RE = re.compile(
+    r"^(post|publish|upload|comment|like|unlike|follow|unfollow|send_dm|dm|story|reply)_", re.I
+)
+
+
+def _action_target_from_args(args) -> str:
+    """Aus den Tool-Argumenten das Ziel der Handlung ziehen (Empfaenger,
+    Account, App). Nur bekannte Schluessel, damit im Protokoll kein halber
+    Nachrichtentext als 'Ziel' landet."""
+    if not isinstance(args, dict):
+        return ""
+    for key in _ACTION_ARG_TARGET_KEYS:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:200]
+    return ""
+
+
+def _action_detail_from_args(args) -> str:
+    """Eine gekappte Klartext-Zeile aus den Argumenten. Bewusst kurz: das
+    Protokoll soll belegen WAS getan wurde, es ist kein zweites Archiv der
+    Nachrichteninhalte."""
+    if not isinstance(args, dict) or not args:
+        return ""
+    parts = []
+    for key, value in args.items():
+        if isinstance(value, (str, int, float, bool)):
+            text = " ".join(str(value).split())
+            parts.append(f"{key}={text[:80]}")
+    return "; ".join(parts)[:300]
+
+
+def _own_action_documented_limits() -> list:
+    """Die numerierten festen Grenzen aus claude_app_status.md, LIVE gelesen —
+    gleicher Grund wie bei _post_author_documented_roles(): eine Kopie im Code
+    waere die Stelle, die veraltet, waehrend sich die echte Absprache
+    aendert (Vorfall 2026-08-10).
+
+    Nur die Regelzeilen selbst, jede gekappt: der komplette Abschnitt ist
+    ueber 1800 Zeichen mit Unterpunkten und Zukunftsideen — vorgelesen waere
+    das eine Zumutung und wuerde die eigentliche Antwort begraben."""
+    knowledge = get_luna_vale_knowledge()
+    if not knowledge:
+        return []
+    match = re.search(r"^## Feste Grenzen[^\n]*\n(.+?)(?=^## )", knowledge, re.S | re.M)
+    if not match:
+        return []
+    rules = []
+    for line in match.group(1).splitlines():
+        text = " ".join(line.split())
+        if not re.match(r"^\d+\.\s", text):
+            continue
+        rules.append(text if len(text) <= 200 else text[:200].rsplit(" ", 1)[0] + " [...]")
+    return rules
+
+
+def _own_action_publish_capability() -> tuple:
+    """Kann Jarvis auf den echten Accounts ueberhaupt etwas veroeffentlichen?
+    Zwei pruefbare Fakten statt einer Behauptung: welcher Instagram-Account
+    eingeloggt ist, und ob der Code eine Veroeffentlichungs-Funktion hat.
+
+    Gibt (Belegzeilen, moeglich) zurueck. `moeglich` steuert das Fazit: wird
+    hier je eine Post-Moeglichkeit gefunden, darf die Antwort NICHT weiter
+    pauschal 'war ich nicht' sagen — sonst wuerde eine veraltete Annahme im
+    Code zu einer falschen Zusage an Ahmad."""
+    lines, possible = [], False
+    own = [str(a).strip() for a in config.get("luna_vale_accounts", []) if str(a).strip()]
+    login = (config.get("instagram_username") or "").strip().lstrip("@")
+    if not login:
+        lines.append(
+            "- Instagram-Login: in config.json steht kein instagram_username — dann ist gar keine "
+            "Instagram-Sitzung von mir hinterlegt."
+        )
+    elif login.lower() in [a.lower() for a in own]:
+        # Das waere eine echte Aenderung der Lage und muss auffallen, statt
+        # unter einer beruhigenden Standardantwort zu verschwinden.
+        possible = True
+        lines.append(
+            f"- ACHTUNG: meine Instagram-Sitzung laeuft auf @{login} — das IST einer der echten "
+            "Posting-Accounts. Das widerspricht der festen Grenze 2 (auf den echten Accounts nicht "
+            "einloggen/tippen) und sollte geprueft werden. Von diesem Zugang aus waere ein Beitrag "
+            "technisch nicht mehr ausgeschlossen."
+        )
+    else:
+        lines.append(
+            f"- Instagram-Login: @{login} (Ahmads privater Ansehen-Account). Das ist KEINER der "
+            f"Posting-Accounts ({', '.join('@' + a for a in own) or 'keine hinterlegt'}) — von diesem "
+            "Zugang aus kann dort nichts veroeffentlicht werden."
+        )
+    # Nur echte, IM MODUL definierte Funktionen zaehlen. Ohne diese Pruefung
+    # schlug die Konstante POST_SHOTS_DIR an (Screenshot-Ordner) und das Fazit
+    # kippte auf "kann nicht ausschliessen, dass ich gepostet habe" — ein
+    # falscher Alarm, live beim Testen gesehen, 2026-08-12.
+    publish_funcs = sorted(
+        name for name in dir(instagram_tools)
+        if _ACTION_PUBLISH_FUNC_RE.match(name)
+        and callable(getattr(instagram_tools, name, None))
+        and getattr(getattr(instagram_tools, name), "__module__", "") == "instagram_tools"
+    )
+    if publish_funcs:
+        possible = True
+        lines.append(
+            "- Code-Scan instagram_tools.py: es GIBT Funktionen, die veroeffentlichen koennten ("
+            + ", ".join(publish_funcs) + ") — dann ist die Aussage 'ich kann nicht posten' nicht "
+            "mehr pauschal richtig und muss am Protokoll geprueft werden."
+        )
+    else:
+        lines.append(
+            "- Code-Scan instagram_tools.py: keine einzige Funktion, die etwas postet, kommentiert, "
+            "liked oder hochlaedt (geprueft wurde jeder Funktionsname des Moduls). Es existiert also "
+            "kein Weg, ueber den ich einen Beitrag ausgeloest haben koennte — auch nicht versehentlich."
+        )
+    return lines, possible
+
+
+_ACTION_PUBLISH_ENTRY_RE = re.compile(
+    r"post|veroeffentlich|veröffentlich|upload|hochgelad|kommentar|comment|reel_", re.I
+)
+
+
+def _own_action_publish_entries(entries: list) -> list:
+    """Protokoll-Eintraege, die nach einer Veroeffentlichung klingen. Ein
+    solcher Eintrag schlaegt jede Annahme im Code — dann darf die Antwort
+    nicht mehr pauschal 'war ich nicht' lauten, sondern muss ihn zeigen.
+    Die Lese-Werkzeuge mit 'post' im Namen (post_author_check, trial_reel_check,
+    fanplace_snapshot) sind ausgenommen, die veroeffentlichen nichts."""
+    return [
+        e for e in entries
+        if _ACTION_PUBLISH_ENTRY_RE.search(f"{e.get('action', '')} {e.get('detail', '')}")
+        and not str(e.get("action", "")).endswith(("_check", "_status", "_snapshot", "_trend", "_analysis"))
+    ]
+
+
+def _own_action_day_window(day):
+    """Tagesgrenzen in Europe/Berlin als Epoch-Fenster — dieselbe Zeitzone,
+    in der Ahmad 'gestern' meint."""
+    tz = ZoneInfo("Europe/Berlin")
+    start = datetime(day.year, day.month, day.day, tzinfo=tz)
+    return start.timestamp(), (start + timedelta(days=1)).timestamp()
+
+
+def _own_action_format_entries(entries: list) -> list:
+    """Autonome Hintergrund-Durchlaeufe zusammenfassen (die kommen im Minuten-
+    takt und wuerden sonst alles zudecken), jede andere Handlung einzeln
+    zeigen — genau die sind naemlich die, nach denen gefragt wird."""
+    lines = []
+    passes, actions = [], []
+    for e in entries:
+        (passes if e.get("action") == "hintergrund_durchlauf" else actions).append(e)
+
+    if actions:
+        lines.append(f"Einzelne Handlungen ({len(actions)}):")
+        for e in actions[:_ACTION_JOURNAL_MAX_LISTED]:
+            marker = {
+                "autonom": "von mir selbst angestossen",
+                "nachgetragen": "nachtraeglich eingetragen, kein automatischer Beleg",
+            }.get(e.get("initiator"), "von dir im Gespraech angestossen")
+            failed = "" if e.get("outcome") == "ok" else f", FEHLGESCHLAGEN ({e.get('outcome')})"
+            target = f" -> {e['target']}" if e.get("target") else ""
+            detail = f" [{e['detail']}]" if e.get("detail") else ""
+            lines.append(f"- {e.get('timestamp', '?')} {e.get('action')}{target}{detail} ({marker}{failed})")
+        if len(actions) > _ACTION_JOURNAL_MAX_LISTED:
+            lines.append(f"- ... und {len(actions) - _ACTION_JOURNAL_MAX_LISTED} weitere an diesem Tag.")
+
+    if passes:
+        counts = {}
+        for e in passes:
+            label = e.get("target") or "unbenannt"
+            counts.setdefault(label, {"ok": 0, "fehler": 0})
+            counts[label]["ok" if e.get("outcome") == "ok" else "fehler"] += 1
+        summary = ", ".join(
+            f"{label} {c['ok']}x" + (f" (+{c['fehler']}x fehlgeschlagen)" if c["fehler"] else "")
+            for label, c in sorted(counts.items())
+        )
+        lines.append(f"Autonome Hintergrund-Durchlaeufe ({len(passes)}): {summary}")
+    return lines
+
+
+async def _tool_own_action_check(args: dict) -> str:
+    mode = (args.get("mode") or "protokoll").strip().lower()
+
+    if mode in ("eintragen", "log", "protokollieren"):
+        action = (args.get("action") or "").strip()
+        if not action:
+            return (
+                "ERROR: Kein Handlungstext angegeben (action). Eintragen ist nur fuer eine Handlung "
+                "gedacht, die ich WIRKLICH selbst ausgefuehrt habe und die nicht automatisch "
+                "protokolliert wird. Was Ahmad mir ueber SEINE Handlungen erzaehlt, gehoert nicht "
+                "hierher, sondern ins Langzeitgedaechtnis (remember)."
+            )
+        memory.add_action_entry(
+            action,
+            target=(args.get("target") or "").strip(),
+            detail=(args.get("detail") or "").strip(),
+            outcome=(args.get("outcome") or "ok").strip(),
+            initiator="nachgetragen",
+        )
+        return (
+            f"In mein Handlungsprotokoll eingetragen: {action}. Der Eintrag ist als nachgetragen "
+            "markiert — er zaehlt spaeter also weniger als ein automatischer Beleg."
+        )
+
+    if mode not in ("protokoll", "check", "pruefen", "prüfen"):
+        return (
+            f"ERROR: Unbekannter Modus '{mode}'. Moeglich sind 'protokoll' (nachsehen, was ich an "
+            "einem Tag getan habe) und 'eintragen' (eine eigene Handlung nachtragen)."
+        )
+
+    when = (args.get("when") or "gestern").strip()
+    day = _post_author_resolve_day(when)  # gleiche Tagesauflösung wie post_author_check
+    if day is None:
+        return (
+            f"ERROR: '{when}' konnte ich nicht als Tag lesen. Moeglich sind 'heute', 'gestern', "
+            "'vorgestern' oder ein Datum wie 2026-08-11."
+        )
+    query = (args.get("query") or "").strip().lower()
+    day_label = day.strftime("%d.%m.%Y")
+    since, until = _own_action_day_window(day)
+
+    lines = [f"Was ich SELBST am {day_label} getan habe (mein eigenes Handlungsprotokoll):"]
+
+    start = memory.get_action_journal_start()
+    entries = memory.get_action_entries(since, until)
+    if query:
+        entries = [
+            e for e in entries
+            if query in f"{e.get('action', '')} {e.get('target', '')} {e.get('detail', '')}".lower()
+        ]
+
+    # Die Abdeckungs-Grenze steht VOR den Eintraegen: ein leeres Protokoll fuer
+    # einen Tag vor Protokollbeginn heisst "ich weiss es nicht", nicht "es ist
+    # nichts passiert" — und diese zwei Aussagen duerfen sich nicht vermischen.
+    covered = False
+    if not start:
+        lines.append(
+            "GRENZE: Mein Handlungsprotokoll ist noch komplett leer — es wird erst seit dem 12.08.2026 "
+            "gefuehrt und hat noch keinen einzigen Eintrag. Fuer diesen Tag kann ich daraus NICHTS "
+            "belegen, weder dass ich etwas getan habe noch dass ich nichts getan habe."
+        )
+    else:
+        lines.append(f"Protokoll reicht zurueck bis: {start} (frueher gibt es keine Eintraege).")
+        try:
+            covered = datetime.strptime(start[:10], "%Y-%m-%d").date() <= day
+        except ValueError:
+            covered = False
+        if not covered:
+            lines.append(
+                f"GRENZE: Der {day_label} liegt VOR dem Protokollbeginn. Dass hier keine Handlung "
+                "steht, ist deshalb kein Beleg dafuer, dass ich an dem Tag nichts getan habe — ich "
+                "habe es damals einfach nicht mitgeschrieben."
+            )
+        elif not entries:
+            lines.append(
+                "Keine protokollierte Handlung an diesem Tag"
+                + (f" zum Suchbegriff '{query}'." if query else ".")
+            )
+
+    if entries:
+        lines.extend(_own_action_format_entries(entries))
+        lines.append(
+            "Protokolliert wird: jeder Werkzeug-Aufruf aus dem Gespraech, jeder autonome "
+            "Hintergrund-Durchlauf und jede von mir selbst an Jerome gesendete WhatsApp. NICHT "
+            "protokolliert: was innerhalb eines Durchlaufs im Detail passiert ist (einzelne "
+            "Sheet-Zeilen, Snapshots) — dafuer sind die Fach-Werkzeuge da."
+        )
+
+    publish_entries = _own_action_publish_entries(entries)
+
+    lines.append("Haette ich auf Social Media ueberhaupt etwas veroeffentlichen koennen?")
+    capability_lines, publish_possible = _own_action_publish_capability()
+    lines.extend(capability_lines)
+    if publish_entries:
+        lines.append(
+            "- Im Protokoll dieses Tages stehen Eintraege, die nach einer Veroeffentlichung klingen "
+            "koennen — die zaehlen mehr als jede Annahme im Code, hier sind sie: "
+            + "; ".join(f"{e.get('timestamp')} {e.get('action')} {e.get('detail', '')}".strip() for e in publish_entries[:5])
+        )
+
+    limits = _own_action_documented_limits()
+    if limits:
+        lines.append(
+            "Dokumentierte feste Grenzen (claude_app_status.md, live gelesen, gekuerzt — vollstaendig "
+            "steht es dort):"
+        )
+        lines.extend(f"  {rule}" for rule in limits)
+    else:
+        lines.append(
+            "In claude_app_status.md finde ich gerade keinen Feste-Grenzen-Abschnitt — dann stuetze "
+            "ich mich nur auf Protokoll und Code-Scan oben."
+        )
+
+    if publish_possible or publish_entries:
+        lines.append(
+            f"Fazit: Ich kann hier NICHT sauber sagen 'das war ich nicht' — oben steht mindestens ein "
+            f"Hinweis, dass eine Veroeffentlichung am {day_label} von mir ausgegangen sein koennte. "
+            "Genau diese Hinweise Ahmad nennen, nichts beschoenigen und nichts behaupten, was ueber "
+            "die Eintraege hinausgeht."
+        )
+    else:
+        # Ohne Protokoll fuer den Tag traegt nur noch der Code-/Login-Befund —
+        # der gilt fuer HEUTE. Das muss dranstehen, sonst klingt ein "war ich
+        # nicht" belegter als es ist.
+        basis = (
+            "Beides zusammen — Protokoll des Tages und Werkzeug-/Login-Stand"
+            if covered else
+            "Das stuetzt sich allein auf den heutigen Werkzeug-/Login-Stand, fuer den Tag selbst habe "
+            "ich kein Protokoll"
+        )
+        lines.append(
+            f"Fazit: Ein Beitrag/Trial Reel am {day_label} kam nicht von mir — ich habe kein Werkzeug, "
+            f"das auf einem Account etwas veroeffentlicht. {basis}. Was ich in dieser Sache tue, ist "
+            "briefen und auswerten (scaling_log, jerome_msg). Wer von den MENSCHEN gepostet hat, "
+            "steht damit weiter offen — das klaert post_author_check, und auch das nur mit Indizien. "
+            "Nichts dazuerfinden."
         )
     return "\n".join(lines)
 
@@ -3351,6 +3736,60 @@ TOOL_REGISTRY: dict = {
         slow=True,
         verbose_reply=True,
     ),
+    "own_action_check": ToolSpec(
+        schema={
+            "name": "own_action_check",
+            "description": (
+                "Nutzen bei Fragen ueber MICH SELBST als Handelnden: 'hast DU das gepostet?', 'war "
+                "das du oder Jerome?', 'was hast du gestern eigentlich gemacht?', 'hast du Jerome "
+                "geschrieben?', 'handelst du eigentlich von allein?'. Sieht in mein eigenes "
+                "Handlungsprotokoll: welche Werkzeuge an dem Tag aus dem Gespraech liefen, welche "
+                "autonomen Hintergrund-Durchlaeufe es gab, welche WhatsApp ich selbst an Jerome "
+                "geschickt habe — plus die pruefbare Frage, ob ich auf Social Media ueberhaupt etwas "
+                "veroeffentlichen KOENNTE (eingeloggter Instagram-Account vs. die echten "
+                "Posting-Accounts, Code-Scan nach Post-Funktionen) und die live gelesenen festen "
+                "Grenzen. WICHTIG: das Protokoll wird erst seit dem 12.08.2026 gefuehrt — fuer "
+                "frueher gibt es keine Eintraege, und das Ergebnis sagt das ausdruecklich; fehlende "
+                "Eintraege NIE als 'ich habe nichts getan' weitergeben. Ich poste selbst nichts; wer "
+                "von den MENSCHEN gepostet hat, klaert post_author_check. Mit mode='eintragen' kann "
+                "eine eigene Handlung nachgetragen werden, die nicht automatisch protokolliert wird."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["protokoll", "eintragen"],
+                        "description": "'protokoll' (Standard): nachsehen. 'eintragen': eine wirklich ausgefuehrte eigene Handlung nachtragen.",
+                    },
+                    "when": {
+                        "type": "string",
+                        "description": "Tag fuer 'protokoll': 'heute', 'gestern', 'vorgestern' oder ein Datum wie 2026-08-11. Standard: gestern.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional, Suchbegriff zum Filtern (z.B. 'jerome', 'whatsapp', 'reel').",
+                    },
+                    "action": {
+                        "type": "string",
+                        "description": "Nur bei mode='eintragen': was getan wurde, kurz (z.B. 'jerome_gebrieft').",
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Nur bei mode='eintragen': worauf sich die Handlung bezog (Empfaenger, Account).",
+                    },
+                    "detail": {
+                        "type": "string",
+                        "description": "Nur bei mode='eintragen': eine Zeile Klartext dazu.",
+                    },
+                },
+                "required": [],
+            },
+        },
+        handler=_tool_own_action_check,
+        speak_result=True,
+        verbose_reply=True,
+    ),
 
     # --- Batch: Rest ---
     "open_app": ToolSpec(
@@ -3955,7 +4394,19 @@ async def _run_tool(block) -> dict:
     except Exception as e:
         print(f"  Tool error ({block.name}): {e}", flush=True)
         result = f"ERROR: {e}"
-    return {"tool_use_id": block.id, "content": str(result), "is_error": str(result).startswith("ERROR:")}
+    is_error = str(result).startswith("ERROR:")
+    # Handlungsprotokoll (2026-08-12, siehe own_action_check): hier laeuft
+    # JEDER Werkzeug-Aufruf durch, deshalb steht der Eintrag an dieser einen
+    # Stelle und nicht in 65 Handlern — ein neues Werkzeug wird damit
+    # automatisch mitprotokolliert und kann nicht vergessen werden.
+    memory.add_action_entry(
+        block.name,
+        target=_action_target_from_args(block.input),
+        detail=_action_detail_from_args(block.input),
+        outcome="error" if is_error else "ok",
+        initiator="ahmad",
+    )
+    return {"tool_use_id": block.id, "content": str(result), "is_error": is_error}
 
 
 _SENTENCE_END_RE = re.compile(r'[.!?]+[)\]"\']*\s+')

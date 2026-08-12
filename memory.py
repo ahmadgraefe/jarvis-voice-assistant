@@ -615,6 +615,120 @@ def mark_self_built_skill_confirmed(tool_name: str):
 
 
 # ---------------------------------------------------------------------------
+# Handlungsprotokoll — was JARVIS SELBST getan hat (Ahmad, 2026-08-12: er
+# fragte, ob Jarvis selbst gestern ein Trial Reel gepostet hatte oder Jerome.
+# Darauf gab es keine Antwort, weil Jarvis ueber eigene vergangene Handlungen
+# ueberhaupt kein Gedaechtnis hatte — Werkzeug-Aufrufe verschwanden nach dem
+# Chat, autonome Hintergrund-Aktionen standen nur in einer Log-Datei, die
+# kein Werkzeug lesen konnte.)
+#
+# Bewusst getrennt von memory.md/profile.json (das ist GESPRAECHS-Wissen) und
+# vom Self-Improve-/Skill-Growth-Changelog (das sind Code-Aenderungen an sich
+# selbst): hier stehen ausgefuehrte HANDLUNGEN mit Zeitstempel, damit die
+# Frage "war das ich?" aus Belegen und nicht aus Erinnerungsgefuehl
+# beantwortet wird. Geschrieben wird an genau drei Stellen, siehe
+# `own_action_check` in server.py, das die Abdeckung auch im Ergebnis nennt.
+# ---------------------------------------------------------------------------
+
+ACTION_JOURNAL_PATH = os.path.join(MEMORY_DIR, "action_journal.jsonl")
+ACTION_JOURNAL_MAX_BYTES = 2 * 1024 * 1024  # ab hier wird auf ACTION_JOURNAL_KEEP_DAYS gekuerzt
+ACTION_JOURNAL_KEEP_DAYS = 120
+
+
+def add_action_entry(
+    action: str,
+    target: str = "",
+    detail: str = "",
+    outcome: str = "ok",
+    initiator: str = "ahmad",
+) -> None:
+    """Eine ausgefuehrte eigene Handlung protokollieren.
+
+    action    — was getan wurde, kurz und maschinenlesbar (z.B. Tool-Name)
+    target    — worauf (Empfaenger, Account, Datei), leer wenn nichts passt
+    detail    — eine Zeile Klartext, gekappt
+    outcome   — 'ok' | 'error' | 'timeout' | 'blocked'
+    initiator — 'ahmad' (im Gespraech angestossen) | 'autonom' (Hintergrund)
+
+    Best-effort: darf NIE werfen. Das Protokoll ist Beleg, aber kein Grund,
+    eine laufende Aktion scheitern zu lassen — ein fehlgeschlagener Schreib-
+    versuch wuerde sonst z.B. eine bereits gesendete WhatsApp als Fehler
+    dastehen lassen."""
+    try:
+        entry = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "epoch": time.time(),
+            "action": str(action)[:120],
+            "target": str(target)[:200],
+            "detail": str(detail)[:400],
+            "outcome": str(outcome)[:20],
+            "initiator": str(initiator)[:20],
+        }
+        with open(ACTION_JOURNAL_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        _prune_action_journal_if_large()
+    except OSError:
+        pass
+
+
+def _prune_action_journal_if_large() -> None:
+    """Das Protokoll waechst mit jedem Werkzeug-Aufruf und jedem autonomen
+    Hintergrund-Durchlauf, also dauerhaft. Erst ab ACTION_JOURNAL_MAX_BYTES
+    kuerzen (nicht bei jedem Schreiben eine Datei neu schreiben) und dabei
+    nur wirklich alte Eintraege wegwerfen. Wichtig: dass gekuerzt wurde, ist
+    ueber get_action_journal_start() sichtbar — sonst wuerde ein leeres
+    Protokoll spaeter wie 'da war nichts' aussehen statt wie 'so weit reicht
+    mein Protokoll nicht zurueck'."""
+    try:
+        if os.path.getsize(ACTION_JOURNAL_PATH) < ACTION_JOURNAL_MAX_BYTES:
+            return
+        cutoff = time.time() - ACTION_JOURNAL_KEEP_DAYS * 86400
+        kept = [e for e in _read_action_entries() if e.get("epoch", 0) >= cutoff]
+        with open(ACTION_JOURNAL_PATH, "w", encoding="utf-8") as f:
+            for e in kept:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def _read_action_entries() -> list:
+    if not os.path.exists(ACTION_JOURNAL_PATH):
+        return []
+    entries = []
+    try:
+        with open(ACTION_JOURNAL_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return []
+    return entries
+
+
+def get_action_entries(since_epoch: float = None, until_epoch: float = None) -> list:
+    """Protokollierte Handlungen in einem Zeitfenster, aufsteigend sortiert."""
+    entries = [
+        e for e in _read_action_entries()
+        if (since_epoch is None or e.get("epoch", 0) >= since_epoch)
+        and (until_epoch is None or e.get("epoch", 0) < until_epoch)
+    ]
+    return sorted(entries, key=lambda e: e.get("epoch", 0))
+
+
+def get_action_journal_start() -> str:
+    """Zeitstempel des aeltesten vorhandenen Eintrags, oder "" wenn das
+    Protokoll leer ist. Damit laesst sich sagen, ob ein Tag ueberhaupt
+    abgedeckt ist — ohne diese Angabe wuerde 'keine Eintraege fuer gestern'
+    faelschlich als 'ich habe gestern nichts getan' gelesen."""
+    entries = _read_action_entries()
+    if not entries:
+        return ""
+    return min(entries, key=lambda e: e.get("epoch", 0)).get("timestamp", "")
+
+
+# ---------------------------------------------------------------------------
 # Knowledge base — durable facts Jarvis researched/collected himself in the
 # background (algorithm changes, niche trends, business insights). Separate
 # from memory.md (which is conversation-derived) so autonomous research

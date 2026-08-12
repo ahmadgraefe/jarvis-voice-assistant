@@ -1,6 +1,6 @@
 # Luna Vale — Status (aus Claude Desktop App übernommen)
 
-Stand: 2026-08-11 (Grosser Jarvis-Audit — mehrere Praezisierungen: Kernregeln, Jerome-Kommunikation, Feste-Grenzen-Enforcement; siehe jeweilige Abschnitte)
+Stand: 2026-08-12 (Handlungsprotokoll fuer eigene Aktionen — `own_action_check`; Rollenverteilung-Zeile zu "keine Geraetesteuerung" korrigiert. Davor 2026-08-11: Grosser Jarvis-Audit — Kernregeln, Jerome-Kommunikation, Feste-Grenzen-Enforcement; siehe jeweilige Abschnitte)
 
 ## Worum es geht
 
@@ -22,9 +22,13 @@ Erfolgsrezept der beiden neuen Accounts: kopieren stark den Content-Stil von @go
 
 - **Ahmad**: postet persönlich auf Instagram/TikTok/Facebook, trifft alle finalen Entscheidungen, einzige Person die Accounts/Geräte selbst bedient.
 - **Jerome** (Mitarbeiter): erstellt und optimiert Content. Kontakt über WhatsApp.
-- **Jarvis**: Tracking, Analyse, Content-Strategie-Empfehlungen, Koordination zwischen Ahmad und Jerome. Kein Posten, keine Gerätesteuerung.
+- **Jarvis**: Tracking, Analyse, Content-Strategie-Empfehlungen, Koordination zwischen Ahmad und Jerome. **Kein Posten** — auf keinem Account, kein Kommentieren/Liken, kein Werkzeug dafür vorhanden. **Korrigiert (2026-08-12, "keine Gerätesteuerung" war so nicht mehr richtig):** Jarvis steuert Ahmads Mac durchaus — Apps öffnen (`open_app`), Klicken/Tippen (`screen_click`/`screen_type`), Browser/Tabs, WhatsApp senden, Meta-Sicherheitsseiten öffnen (`facebook_secure`). Was gilt, ist die engere Regel: auf den **echten Posting-Accounts** wird nicht getippt, gewischt oder navigiert (feste Grenze 2 unten), und Zugangsdaten fasst Jarvis nicht an (Grenze 3).
 
 **Wer hat einen bestimmten Post gemacht? (2026-08-12, nach Ahmads Frage "war der Post von gestern von mir oder von Jerome?")** — Das ist technisch NICHT feststellbar: Instagram/TikTok/Facebook zeigen bei einem Account, den mehrere Menschen benutzen, keine Autoren-Angabe pro Beitrag, und Jarvis hat weder Login-/Geräteverlauf noch Zugriff auf private Accounts von Ahmad oder Jerome. Werkzeug dafür: `post_author_check` in `server.py` — es sammelt nur die echten Belege (Account zum Post-Link, messbar dazugekommene Beiträge aus den Instagram-Snapshots, diese dokumentierte Rollenverteilung, gemerkte Fakten) und sagt ausdrücklich, dass die Person daraus nicht bewiesen ist. Niemals selbst eine Person nennen, ohne dass Ahmad das bestätigt hat.
+
+**War es Jarvis selbst? (2026-08-12, nach Ahmads Frage, ob JARVIS gestern ein Trial Reel gepostet hatte oder Jerome)** — Diese dritte Möglichkeit war vorher überhaupt nicht prüfbar: Jarvis hatte kein Gedächtnis für eigene vergangene Handlungen (Werkzeug-Aufrufe verschwanden mit dem Chat, autonome Hintergrund-Durchläufe standen nur in einer Log-Datei, die kein Werkzeug lesen konnte). Werkzeug dafür: `own_action_check` in `server.py` — es liest das **Handlungsprotokoll** (`memory/action_journal.jsonl`, geschrieben von `_run_tool` in server.py, `_run_pass_safely` in background_brain.py und den beiden Jerome-Sendern in jerome_comm.py) und prüft zusätzlich, ob eine Veröffentlichung technisch überhaupt von Jarvis ausgegangen sein könnte (eingeloggter Instagram-Account vs. die fünf Posting-Accounts, Code-Scan von `instagram_tools.py` nach Post-Funktionen). Zwei Punkte, die immer mitgesagt werden müssen: das Protokoll wird **erst seit 2026-08-12** geführt (für frühere Tage gibt es keine Einträge — fehlende Einträge sind KEIN Beleg dafür, dass nichts passiert ist), und protokolliert werden Werkzeug-Aufrufe/Durchläufe, nicht jeder Einzelschritt innerhalb eines Durchlaufs. `post_author_check` zieht den Protokoll-Befund inzwischen mit ein.
+
+**Bewusst NICHT gebaut (2026-08-12): eigenständiges Posten/Kommentieren/Liken auf den echten Accounts.** Das ist keine fehlende Umsetzung, sondern die festen Grenzen 2 und 5 (Ban-Risiko bei automatisierten Eingabemustern). Wenn Ahmad autonome Social-Media-Aktionen möchte, ist das eine Änderung DIESER Grenzen und muss hier zuerst entschieden werden — nicht nebenbei in einem Werkzeug. Der ehrliche Stand bis dahin: Jarvis brieft (`scaling_log`, `jerome_msg`) und wertet aus, gepostet wird von Menschen.
 
 **Offene Frage dazu (Ahmad muss klären):** dass Ahmad überhaupt fragt, ob ein Post von ihm oder von Jerome war, passt nicht zur oben dokumentierten Aufteilung ("Ahmad postet, Jerome postet NICHT" — so auch im Langzeitgedächtnis, Stand 2026-08-11). Entweder postet Jerome inzwischen doch, oder die Frage war anders gemeint. Bis Ahmad das beantwortet: die Aufteilung als **möglicherweise veraltet** behandeln und nicht als Beweis für einen einzelnen Post verwenden. `post_author_check` merkt diese Frage automatisch als Pending Question vor.
 
@@ -92,6 +96,8 @@ Trial Reels: exakt 3h nach Posten. Hauptfeed-Posts: ~3h (früher Indikator) UND 
 ## Feste Grenzen (unveraendert wichtig — gilt fuer Jarvis genauso)
 
 **Wichtige Klarstellung (2026-08-11):** diese Grenzen sind rein auf Prompt-/Gedaechtnis-Ebene durchgesetzt, NICHT technisch im Code blockiert. `screen_click`/`screen_type` pruefen nicht, ob das Ziel einer der 5 echten Accounts ist — nichts im Code wuerde einen Klick/eine Eingabe dort technisch verhindern. Der Schutz besteht ausschliesslich darin, dass Jarvis diese Regeln befolgt.
+
+**Ergänzung (2026-08-12):** überprüfbar ist die Einhaltung inzwischen wenigstens nachträglich — `own_action_check` liest das Handlungsprotokoll (jeder Werkzeug-Aufruf, jeder autonome Hintergrund-Durchlauf, jede selbst gesendete Jerome-WhatsApp) und meldet ausdrücklich Alarm, falls die Instagram-Sitzung auf einem der echten Posting-Accounts läuft oder im Code eine Post-Funktion auftaucht. Verhindern kann es nichts, aber "war das ich?" ist damit belegbar statt Beteuerung.
 
 1. Nie Smartphones/virtuelle Geräte (z.B. GeeLark) konfigurieren, einrichten oder verwalten — bleibt immer bei Ahmad, auch für ein künftiges Research-Gerät (siehe unten). Jarvis richtet nichts selbst ein.
 2. Auf den ECHTEN Posting-Accounts (lunaxvale, cowgirllunavale, lunavalethegoth, lunas.crypt, succubuslunavale — ALLE fuenf, siehe Tabelle oben, diese Liste MUSS bei jedem neuen/entfernten Account mitgepflegt werden) nie selbst tippen, wischen oder navigieren — nur Screenshots lesen. Grund: automatisierte Eingabemuster auf echten Accounts sind ein Bann-Risiko bei Instagram.

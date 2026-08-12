@@ -122,6 +122,17 @@ async def notify_jerome(account: str, video_link: str, virality_factor: str, nex
 
     result = await app_control.send_whatsapp(contact, message)
     _log(f"Jerome benachrichtigt ueber {video_link}: {result}")
+    # Handlungsprotokoll (2026-08-12): diese Nachricht geht ohne Ahmads Zutun
+    # raus, ist aber eine echte, nach aussen sichtbare eigene Handlung. Ohne
+    # Eintrag koennte Jarvis spaeter nicht belegen, dass/was er selbst getan
+    # hat — genau die Luecke aus Ahmads Frage "war das ich oder Jerome?".
+    memory.add_action_entry(
+        "whatsapp_an_jerome_gesendet",
+        target=f"Jerome ({account})",
+        detail=f"Trial-Reel-Anweisung zu {video_link}",
+        outcome="error" if str(result).startswith("ERROR") else "ok",
+        initiator="autonom",
+    )
     return result
 
 
@@ -137,6 +148,13 @@ async def send_raw_message(message_body: str) -> str:
         return "ERROR: Jerome's WhatsApp-Kontakt ist noch nicht in config.json hinterlegt (jerome_contact)."
     result = await app_control.send_whatsapp(contact, message_body + SIGNATURE)
     _log(f"Rohe Nachricht an Jerome gesendet: {result}")
+    memory.add_action_entry(
+        "whatsapp_an_jerome_gesendet",
+        target="Jerome",
+        detail=" ".join(message_body.split())[:200],
+        outcome="error" if str(result).startswith("ERROR") else "ok",
+        initiator="autonom",
+    )
     return result
 
 
