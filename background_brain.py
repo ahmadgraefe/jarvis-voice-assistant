@@ -515,17 +515,16 @@ async def _run_health_check(config: dict) -> str:
 
     timers = _load_timers()
     now = time.time()
-    current_hour = int(time.strftime("%H"))
-    in_jerome_hours = JEROME_WORK_HOUR_START <= current_hour < JEROME_WORK_HOUR_END
     for key, interval, label in (
         ("instagram", INSTAGRAM_INTERVAL_SECONDS, "Instagram-Check"),
         ("business", BUSINESS_CYCLE_INTERVAL_SECONDS, "Business-Zyklus (Discovery/Trial-Reel/Video-Analyse)"),
         ("research", RESEARCH_INTERVAL_SECONDS, "Recherche"),
         ("self_improve", SELF_IMPROVE_INTERVAL_SECONDS, "Self-Improve"),
-        ("jerome", JEROME_INTERVAL_SECONDS, "Jerome-Chat-Check"),
+        # "jerome" 2026-08-12 entfernt: jerome_reply_pass laeuft nicht mehr
+        # automatisch (Ahmad: "nur noch auf Zuruf", Kostenreduktion) --
+        # ohne diese Zeile wuerde ein "seit X Stunden ueberfaellig"-Fehlalarm
+        # entstehen, obwohl das jetzt so gewollt ist.
     ):
-        if key == "jerome" and not in_jerome_hours:
-            continue  # gated to 10-17 Uhr by design — stale outside that window is EXPECTED, not a problem
         last = timers.get(key, 0)
         if last == 0:
             continue  # never run yet — not necessarily a problem (fresh install)
@@ -2476,13 +2475,16 @@ CONTENT_BRIEF_RETRY_SECONDS = 60 * 60  # on failure, retry hourly — NOT every 
 
 
 async def content_brief_pass(config: dict):
-    """Once per calendar day, no earlier than CONTENT_BRIEF_HOUR — the daily
-    'content research machine' run Ahmad asked for (2026-08-06): scans every
-    Luna Vale account's own profile, known competitors, and fresh Instagram
-    hashtag trends, filters for real brand fit, and sends Jerome ONE
-    complete brief with real links. Always via content_strategy.py's atomic
-    pipeline, never composed ad-hoc — that's exactly what broke live earlier
-    the same day (see content_strategy.py's module docstring).
+    """Once per calendar day, no earlier than CONTENT_BRIEF_HOUR — der
+    taegliche Trial-Reel-Ableitungs-Lauf (2026-08-12 umgebaut, Ahmad: 'wir
+    arbeiten mit unseren Videos die funktionieren... nicht mehr nach neuem
+    Content suchen'): liest NUR die eigenen, im Sheet bestaetigten Winner,
+    leitet daraus Trial-Reel-Varianten ab (eine Variable geaendert), schickt
+    Jerome EINE komplette Nachricht mit echten Links. Konkurrenz-/Trend-
+    Recherche laeuft seitdem separat, woechentlich, siehe
+    competitor_content_scan_pass weiter unten. Immer ueber content_strategy.py's
+    atomare Pipeline, nie ad-hoc komponiert — das war der urspruengliche
+    Fehler (siehe Modul-Docstring dort).
 
     Only marks the day 'done' on an actual successful send — a transient
     failure (caught live: Contacts.app not running yet on a cold boot) used
@@ -2517,6 +2519,51 @@ async def content_brief_pass(config: dict):
     memory.mark_content_brief_done()
     await _alert(config, f"Jarvis: heutiger Content-Brief an Jerome raus — {result}")
     _log(f"Content-Brief gesendet: {result}")
+
+
+COMPETITOR_SCAN_INTERVAL_SECONDS = 7 * 24 * 60 * 60  # Ahmad, 2026-08-12: "vielleicht 1x pro Woche neuem Content suchen bei der Konkurrenz"
+COMPETITOR_SCAN_RETRY_SECONDS = 60 * 60  # gleiches Prinzip wie CONTENT_BRIEF_RETRY_SECONDS
+
+
+async def competitor_content_scan_pass(config: dict):
+    """Woechentliches Gegenstueck zu content_brief_pass (2026-08-12 neu,
+    Ahmad: 'vielleicht 1x pro Woche neuem Content suchen bei der
+    Konkurrenz'). Scannt Konkurrenz-Accounts + frische Hashtag-Trends,
+    filtert nach Marken-Passung, schickt Jerome EINE separate, klar als
+    Inspiration gekennzeichnete Nachricht (siehe
+    content_strategy.send_weekly_competitor_brief). Einfaches rollierendes
+    Intervall statt Kalendertag-Gate (wie TARGET_CREATOR_INTERVAL_SECONDS) --
+    ein fester Wochentag ist nicht noetig, 'ungefaehr 1x/Woche' reicht.
+    Markiert den Zeitstempel nur bei tatsaechlichem Erfolg, gleiches Prinzip
+    wie content_brief_pass — ein transienter Fehler soll die naechste
+    Woche nicht einfach ueberspringen."""
+    if time.time() - _load_timers().get("competitor_scan", 0) < COMPETITOR_SCAN_INTERVAL_SECONDS:
+        return
+    if not config.get("luna_vale_accounts") or not config.get("jerome_contact", "").strip():
+        return
+
+    timers = _load_timers()
+    if time.time() - timers.get("competitor_scan_attempt", 0) < COMPETITOR_SCAN_RETRY_SECONDS:
+        return
+    _save_timer("competitor_scan_attempt", time.time())
+
+    _log("Woechentlicher Konkurrenz-Scan startet...")
+    client = anthropic.AsyncAnthropic(api_key=config["anthropic_api_key"])
+    try:
+        result = await content_strategy.send_weekly_competitor_brief(client)
+    except Exception as e:
+        _log(f"FEHLER beim Konkurrenz-Scan: {_exc(e)}")
+        return
+    finally:
+        await client.close()
+
+    if result.startswith("ERROR"):
+        _log(f"Konkurrenz-Scan fehlgeschlagen, naechster Versuch in ca. 1h: {result}")
+        return
+
+    _save_timer("competitor_scan", time.time())
+    await _alert(config, f"Jarvis: woechentliche Konkurrenz-Inspiration an Jerome raus — {result}")
+    _log(f"Konkurrenz-Scan gesendet: {result}")
 
 
 INSTAGRAM_INSIGHTS_MORNING_HOUR = 7   # Ahmad, 2026-08-12: "jeden Tag um 07:00 Uhr Berlin-Zeit"
@@ -2921,15 +2968,12 @@ async def main():
             last_target_creator = now
             _save_timer("target_creator", now)
 
-        # Eigener, schneller Takt (Ahmad, 2026-08-06: "kuerzer als 90 Minuten,
-        # damit wir schneller reagieren") — nur innerhalb Jeromes tatsaechlicher
-        # Arbeitszeit (Philippinen, ~4h/Tag ab meistens 11-12 Uhr deutscher Zeit).
-        current_hour = int(time.strftime("%H"))
-        in_jerome_hours = JEROME_WORK_HOUR_START <= current_hour < JEROME_WORK_HOUR_END
-        if in_jerome_hours and now - last_jerome >= JEROME_INTERVAL_SECONDS:
-            await _run_pass_safely("Jerome-Antwort-Check", config, jerome_reply_pass(config))
-            last_jerome = now
-            _save_timer("jerome", now)
+        # Automatischer 15-Minuten-Jerome-Check 2026-08-12 abgeschaltet (Ahmad:
+        # "nur noch auf Zuruf", Kostenreduktion) -- dieselbe Faehigkeit (pruefen
+        # UND bei Bedarf direkt antworten) gibt es jetzt live ueber das
+        # jerome_check-Werkzeug in server.py, jerome_reply_pass() selbst bleibt
+        # als Funktion bestehen falls spaeter (z.B. Ahmads geplante WhatsApp-
+        # Webhook-API) doch wieder ein automatischer Trigger gewuenscht ist.
 
         await _run_pass_safely("Tages-Zusammenfassung", config, daily_summary_pass(config))
         await _run_pass_safely("Morgen-Briefing", config, morning_briefing_pass(config))
@@ -2942,6 +2986,7 @@ async def main():
         # grosszuegiges Zeitbudget, gleiches Prinzip wie self_improve/
         # skill_growth (timeout=650).
         await _run_pass_safely("Content-Brief", config, content_brief_pass(config), timeout=600)
+        await _run_pass_safely("Konkurrenz-Scan (woechentlich)", config, competitor_content_scan_pass(config), timeout=600)
         await _run_pass_safely("Instagram-Insights", config, instagram_insights_pass(config), timeout=300)
 
         # Recherche laeuft bewusst auf ihrem EIGENEN, langsameren Takt (1-2x/Tag,

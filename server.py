@@ -1744,8 +1744,22 @@ async def _tool_scaling_log(args: dict) -> str:
 
 
 async def _tool_jerome_check(args: dict) -> str:
+    """2026-08-12: uebernimmt zusaetzlich das, was bisher NUR der jetzt
+    abgeschaltete automatische 15-Minuten-Check (jerome_reply_pass) machte
+    -- bei Bedarf direkt antworten statt nur zu melden dass Jerome
+    geschrieben hat (Ahmad: 'nur noch auf Zuruf'). notify_ahmad_fn bleibt
+    hier bewusst weg (kein separater WhatsApp-Alarm) -- Ahmad spricht gerade
+    live mit Jarvis, die ahmad_note geht direkt als gesprochene Antwort mit."""
     reply = await jerome_comm.check_jerome_replies(ai)
-    return f"Jerome hat geantwortet: {reply}" if reply else "Nichts Neues von Jerome."
+    if not reply:
+        return "Nichts Neues von Jerome."
+    result = await jerome_comm.handle_jerome_message(ai, reply, config)
+    parts = [f'Jerome schrieb: "{reply}"']
+    if result.get("reply"):
+        parts.append(f"Ich habe ihm direkt geantwortet: {result['reply']}")
+    if result.get("ahmad_note"):
+        parts.append(result["ahmad_note"])
+    return " ".join(parts)
 
 
 async def _tool_jerome_brief(args: dict) -> str:
@@ -4707,7 +4721,7 @@ TOOL_REGISTRY: dict = {
     "jerome_check": ToolSpec(
         schema={
             "name": "jerome_check",
-            "description": "Prueft ob Jerome auf WhatsApp geantwortet hat, gibt seine neueste Nachricht zurueck. Sag vorher 'Ich schaue kurz ob Jerome geantwortet hat.'",
+            "description": "Prueft ob Jerome auf WhatsApp geantwortet hat UND beantwortet ihn bei Bedarf direkt (Content-/Instagram-Fragen sofort, alles was nur Ahmad entscheiden kann mit einer Zwischenantwort an Jerome plus Hinweis hier). Laeuft nicht mehr automatisch im Hintergrund, nur noch auf Zuruf -- darum ruhig proaktiv nutzen, wenn Ahmad nach Jerome fragt oder es zum Gespraech passt. Sag vorher 'Ich schaue kurz ob Jerome geantwortet hat.'",
             "input_schema": {"type": "object", "properties": {}, "required": []},
         },
         handler=_tool_jerome_check,

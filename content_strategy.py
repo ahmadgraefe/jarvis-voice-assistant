@@ -147,30 +147,45 @@ def _gather_competitor_winners(handles: list, top_n: int = 3) -> list:
     return top
 
 
-async def gather_account_data(account: str, anthropic_client) -> dict:
-    """Everything real and current for ONE account: own winners (both the
-    already-vetted Winner Tracking entries AND a live scan of the account's
-    own profile, since Winner Tracking alone can be thin for a newer
-    account), relevant competitor winners, and fresh hashtag-search trend
-    posts."""
-    config = _load_config()
-    _log(f"Sammle Daten fuer {account}...")
+async def gather_daily_account_data(account: str) -> dict:
+    """Taeglicher Pfad (2026-08-12, Ahmad: 'wir arbeiten mit unseren Videos
+    die funktionieren... nicht mehr nach neuem Content suchen'): NUR eigene,
+    bereits im Sheet bestaetigte Winner. Reine Sheet-Read, kein Playwright/
+    Vision mehr -- der fruehere Live-Rescan des eigenen Profils entfaellt
+    hier bewusst, seit instagram_insights_pass das Sheet zuverlaessig mit
+    echten Zahlen fuellt und ein zusaetzlicher Live-Scan daneben redundant
+    waere."""
+    _log(f"Sammle taegliche Daten fuer {account}...")
+    return {"own_winners_tracked": await _gather_own_winners(account)}
 
-    own_winners_tracked = await _gather_own_winners(account)
-    own_winners_profile_scan = await _gather_own_profile_winners(account, anthropic_client)
-    try:
-        competitor_winners = (
-            _gather_competitor_winners(config.get("competitor_accounts", []), top_n=COMPETITOR_TOP_N)
-            if account == COMPETITOR_RELEVANT_ACCOUNT else []
-        )
-    except Exception as e:
-        # Not wrapped before — a single malformed line in the video-analysis
-        # log (or a permissions hiccup) would have propagated all the way up
-        # and killed the ENTIRE daily brief for all 3 accounts over one
-        # account's competitor data. One account's data gap should never
-        # cost the other two accounts their brief.
-        _log(f"Fehler beim Lesen der Konkurrenz-Daten fuer {account}: {e}")
-        competitor_winners = []
+
+async def gather_weekly_competitor_data(account: str, anthropic_client) -> dict:
+    """Woechentlicher Pfad (2026-08-12, Ahmad: 'vielleicht 1x pro Woche
+    neuem Content suchen bei der Konkurrenz'): Konkurrenz-Winner + frische
+    Hashtag-Trends. video_analysis_pass laeuft nicht mehr automatisch im
+    Hintergrund (Kostenreduktion) -- ruft darum hier selbst einmal frisch
+    instagram_tools.analyze_recent_videos() pro Konkurrenz-Account auf, bevor
+    _gather_competitor_winners liest, sonst waere die Datenquelle
+    (video_analysis.jsonl) dauerhaft eingefroren."""
+    config = _load_config()
+    _log(f"Sammle woechentliche Konkurrenz-Daten fuer {account}...")
+
+    competitor_winners = []
+    if account == COMPETITOR_RELEVANT_ACCOUNT:
+        competitor_handles = config.get("competitor_accounts", [])
+        for handle in competitor_handles:
+            try:
+                await instagram_tools.analyze_recent_videos(handle, anthropic_client, count=6)
+            except Exception as e:
+                _log(f"Fehler beim frischen Scan von Konkurrent @{handle}: {e}")
+            await asyncio.sleep(2)
+        try:
+            competitor_winners = _gather_competitor_winners(competitor_handles, top_n=COMPETITOR_TOP_N)
+        except Exception as e:
+            # Ein einzelner Account-Fehler soll nicht die ganze woechentliche
+            # Pass fuer alle Accounts kosten.
+            _log(f"Fehler beim Lesen der Konkurrenz-Daten fuer {account}: {e}")
+            competitor_winners = []
 
     trend_posts = []
     for keyword in NICHE_KEYWORDS.get(account, []):
@@ -183,12 +198,7 @@ async def gather_account_data(account: str, anthropic_client) -> dict:
             _log(f"Fehler bei Hashtag-Suche #{keyword} fuer {account}: {e}")
         await asyncio.sleep(2)
 
-    return {
-        "own_winners_tracked": own_winners_tracked,
-        "own_winners_profile_scan": own_winners_profile_scan,
-        "competitor_winners": competitor_winners,
-        "trend_posts": trend_posts,
-    }
+    return {"competitor_winners": competitor_winners, "trend_posts": trend_posts}
 
 
 async def _get_persona_summaries() -> dict:
@@ -219,135 +229,57 @@ async def _get_persona_summaries() -> dict:
     }
 
 
-async def build_daily_content_brief(anthropic_client) -> dict:
-    """Gathers real data for EVERY Luna Vale account. Returns a dict keyed
-    by account handle — an account with no data anywhere just gets empty
-    lists, never invented filler.
+async def build_daily_content_brief() -> dict:
+    """Gathers real data for EVERY Luna Vale account -- taeglicher Pfad, nur
+    Sheet-Winner (siehe gather_daily_account_data). Returns a dict keyed by
+    account handle — ein Account ohne Daten bekommt einfach eine leere Liste,
+    nie erfundene Fuellsel.
 
     Each account is isolated: an unexpected failure on ONE (Instagram
-    hiccup, malformed data) still lets the other two accounts' real data
-    reach Jerome instead of losing the whole day's brief over one account."""
+    hiccup, malformed data) still lets the other accounts' real data reach
+    Jerome instead of losing the whole day's brief over one account."""
     config = _load_config()
     accounts = config.get("luna_vale_accounts", [])
     account_data = {}
     for account in accounts:
         try:
-            account_data[account] = await gather_account_data(account, anthropic_client)
+            account_data[account] = await gather_daily_account_data(account)
         except Exception as e:
-            _log(f"Fehler beim Sammeln der Daten fuer {account} — Account uebersprungen: {e}")
-            account_data[account] = {
-                "own_winners_tracked": [], "own_winners_profile_scan": [],
-                "competitor_winners": [], "trend_posts": [],
-            }
+            _log(f"Fehler beim Sammeln der taeglichen Daten fuer {account} — Account uebersprungen: {e}")
+            account_data[account] = {"own_winners_tracked": []}
     return account_data
 
 
-async def send_daily_content_brief(anthropic_client) -> str:
-    """The full pipeline: gather ALL data first, THEN compose ONE message,
-    THEN send it ONCE. Never sends anything until composition is fully
-    done — the exact ordering that was missing when this broke live."""
-    account_data = await build_daily_content_brief(anthropic_client)
-    personas = await _get_persona_summaries()
-
-    has_anything = any(
-        d["own_winners_tracked"] or d["own_winners_profile_scan"] or d["competitor_winners"] or d["trend_posts"]
-        for d in account_data.values()
-    )
-    if not has_anything:
-        _log("Keine verwertbaren Daten gefunden, keine Nachricht gesendet.")
-        return "ERROR: Keine verwertbaren Daten gefunden — keine Nachricht an Jerome geschickt."
-
-    payload = json.dumps(account_data, ensure_ascii=False, indent=2)
-    persona_block = json.dumps(personas, ensure_ascii=False, indent=2)
+async def _compose_and_send_brief(anthropic_client, prompt_text: str, log_label: str) -> str:
+    """Gemeinsamer Kern fuer taeglichen und woechentlichen Content-Brief: EIN
+    Claude-Call, parsen, EINE WhatsApp-Nachricht senden, ins Wissen und in
+    die Daily Production List eintragen. Gather-then-compose-then-send in
+    genau dieser Reihenfolge, nie piecemeal — das war der urspruengliche
+    Fehler (siehe Modul-Docstring)."""
     try:
         response = await anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=900,
-            messages=[{
-                "role": "user",
-                "content": (
-                "Hier ist die MARKEN-DEFINITION pro Account (Persona Summary aus dem Tracking-"
-                f"Sheet — das ist der Massstab fuer 'passt zur Marke', NICHT nur 'ist im richtigen "
-                f"Genre'):\n\n{persona_block}\n\n"
-                "Hier sind recherchierte Rohdaten fuer Jerome's heutige Content-Aufgaben, pro "
-                f"Luna-Vale-Account (own_winners_tracked = im Sheet bereits als KEEP bestaetigte "
-                f"eigene Videos, own_winners_profile_scan = frisch direkt vom eigenen Profil "
-                f"gescannte Top-Videos nach Likes sortiert — beides sind ECHTE eigene Videos, nur "
-                f"aus zwei Quellen, competitor_winners = bekannte starke Konkurrenz-Videos, "
-                f"trend_posts = frisch per Hashtag-Suche gefundene aktuelle Top-Posts):\n\n{payload}\n\n"
-                "WICHTIG — Marken-Filter zuerst: Ahmads ausdruecklicher Wunsch ist, dass NUR "
-                "Videos empfohlen werden, die WIRKLICH zur jeweiligen Marken-Persona passen, "
-                "nicht einfach alles was im Hashtag gut performt. Ein Video kann gute Zahlen "
-                "haben und trotzdem NICHT passen — so etwas AUSSORTIEREN, auch wenn die Zahlen "
-                "verlockend sind. Priorisiere competitor_winners hoeher als generische trend_posts, "
-                "wenn beide vorhanden sind — Ahmad will dass viel auf die Konkurrenz geschaut wird. "
-                "Bevorzuge Videos mit: starkem Hook in den ersten 1-2 Sekunden, klarer "
-                "Transformation/Kontrast (z.B. soft girl -> full goth), Outfit-Wechsel/Transitions, "
-                "hoher Energie/Bewegung, dark-feminine/selbstbewusst-mysterioeser Ton (v.a. bei "
-                "lunaxvale), Comedy/Street-Interview-Punchlines, und sichtbaren US/englischsprachigen "
-                "Signalen (us_signals-Feld) — das zieht das gewuenschte englischsprachige Publikum an. "
-                "SORTIERE AUS: niedrige Qualitaet/schlechte Beleuchtung (quality-Feld), Content der "
-                "nur in nicht-englischsprachigen Maerkten funktioniert, und alles was nicht wirklich "
-                "zur jeweiligen Nische passt (kein 'random trend' nur weil er gerade viral ist).\n\n"
-                "Schreib daraus ZWEI Dinge, in GENAU diesem Format (zwei Abschnitte mit den "
-                "exakten Markern, sonst nichts drumherum):\n\n"
-                "===WHATSAPP===\n"
-                "EINE vollstaendige WhatsApp-Nachricht an Jerome, auf ENGLISCH (er spricht kein "
-                "Deutsch). Struktur: kurze Begruessung, dann PRO ACCOUNT (nur wenn fuer diesen "
-                "Account nach dem Filter wirklich passende Daten uebrig bleiben — Account komplett "
-                "weglassen wenn nichts passt) eine kurze Ueberschrift mit dem Account-Handle. Fuer "
-                "JEDES empfohlene Video GENAU dieses 4-Punkte-Format als kompakter Block (keine "
-                "langen Absaetze):\n"
-                "1. Concept: kurze Beschreibung worum es geht\n"
-                "2. Why it fits: warum es zu diesem Account/dieser Marke passt\n"
-                "3. Key elements: was macht es funktionieren (Hook/Struktur/Text/Energie)\n"
-                "4. Link: der EXAKTE Link aus den Rohdaten (NIEMALS einen Link erfinden, aendern "
-                "oder auslassen)\n"
-                "Maximal 2-3 Videos pro Account — Qualitaet vor Quantitaet, nur wirklich "
-                "nachbauenswerte Videos, keine Fuellsel-Empfehlungen. Nur der fertige "
-                "Nachrichtentext, keine Meta-Kommentare, KEINE eigene Signatur am Ende (wird "
-                "automatisch ergaenzt).\n\n"
-                "===PRODUCTION===\n"
-                "Fuer JEDES Video aus der WhatsApp-Nachricht oben (gleiche Auswahl, gleiche "
-                "Reihenfolge) EINEN Block in GENAU diesem Format — bewusst KEIN JSON, damit "
-                "Anfuehrungszeichen in Zitaten/Hooks nichts kaputt machen:\n"
-                "---VIDEO---\n"
-                "ACCOUNT: <handle ohne @>\n"
-                "TYPE: Normal\n"
-                "LINK: <der exakte Link, identisch zum WhatsApp-Abschnitt>\n"
-                "HOOK: <die Kernidee/der Hook in einem Satz, Englisch>\n"
-                "OUTFIT: <konkreter Vorschlag Outfit/Setting fuer die Umsetzung, Englisch — leer "
-                "lassen (Zeile trotzdem schreiben, nur ohne Text danach) wenn aus den Rohdaten "
-                "nicht klar erkennbar>\n"
-                "SOUND: <Sound/Audio-Hinweis falls aus den Rohdaten erkennbar, sonst leer>\n"
-                "INSTRUCTION: <EINE klare, direkte Anweisung an Jerome in einfachem Englisch, was "
-                "genau zu tun ist>\n"
-                "CAPTION: <ein vorgeschlagener finaler Caption-Text, Englisch>\n"
-                "---END---"
-                ),
-            }],
+            messages=[{"role": "user", "content": prompt_text}],
         )
     except Exception as e:
-        # Not caught before — a Claude API hiccup here (rate limit, network)
-        # would have raised straight out of this function. Both callers
-        # DO have their own outer safety nets (server.py's execute_action
-        # try/except, background_brain's content_brief_pass try/except+
-        # hourly retry), so nothing would have crashed — but the error
-        # reaching Ahmad would've been a raw Python exception string instead
-        # of a clear, diagnosable message, and all the real Instagram/Sheet
-        # research done above would be silently thrown away instead of
-        # being reported as 'gathered but couldn't compose'.
-        _log(f"FEHLER beim Komponieren der Content-Brief-Nachricht: {e}")
+        # Both callers have their own outer safety nets (server.py's
+        # execute_action try/except, background_brain's *_pass try/except +
+        # Retry), so nothing crashes — aber ohne das hier waere die Meldung
+        # eine rohe Python-Exception statt einer klaren, und die schon
+        # gesammelten echten Daten wuerden stillschweigend verworfen statt
+        # als "gesammelt, aber nicht komponiert" gemeldet.
+        _log(f"FEHLER beim Komponieren ({log_label}): {e}")
         return f"ERROR: Daten gesammelt, aber Nachricht konnte nicht komponiert werden: {e}"
 
     raw = response.content[0].text.strip()
     message_body, production_rows = _parse_brief_response(raw)
     if not message_body:
-        _log(f"FEHLER: Konnte WhatsApp-Abschnitt nicht aus der Antwort extrahieren: {raw[:300]!r}")
+        _log(f"FEHLER ({log_label}): Konnte WhatsApp-Abschnitt nicht aus der Antwort extrahieren: {raw[:300]!r}")
         return "ERROR: Daten gesammelt, aber Nachricht konnte nicht aus der Antwort extrahiert werden."
 
     result = await jerome_comm.send_raw_message(message_body)
-    _log(f"Content-Brief gesendet: {result}")
+    _log(f"{log_label} gesendet: {result}")
 
     # "Das Gehirn erweitern" (Ahmad's own words) — this research shouldn't
     # just fire-and-forget into a WhatsApp message and vanish. Folding a
@@ -355,7 +287,7 @@ async def send_daily_content_brief(anthropic_client) -> str:
     # conversation, and daily summaries can all draw on what was found today.
     if not result.startswith("ERROR"):
         memory.add_knowledge(
-            f"Content-Brief an Jerome ({time.strftime('%Y-%m-%d')}):\n{message_body}",
+            f"{log_label} ({time.strftime('%Y-%m-%d')}):\n{message_body}",
             category="content-strategy",
         )
 
@@ -371,6 +303,158 @@ async def send_daily_content_brief(anthropic_client) -> str:
                 _log(f"FEHLER beim Eintragen in Daily Production List ({row.get('account')}): {e}")
 
     return result
+
+
+async def send_daily_content_brief(anthropic_client) -> str:
+    """The full pipeline: gather ALL data first, THEN compose ONE message,
+    THEN send it ONCE. Taeglicher Pfad seit 2026-08-12 (Ahmad: 'wir arbeiten
+    mit unseren Videos die funktionieren... nicht mehr nach neuem Content
+    suchen') nur noch mit den eigenen, im Sheet bestaetigten Winnern —
+    Aufgabe ist jetzt Variation statt Neuentdeckung."""
+    account_data = await build_daily_content_brief()
+    personas = await _get_persona_summaries()
+
+    has_anything = any(d["own_winners_tracked"] for d in account_data.values())
+    if not has_anything:
+        _log("Keine bestaetigten eigenen Winner im Sheet gefunden, keine Nachricht gesendet.")
+        return "ERROR: Keine bestaetigten eigenen Winner im Sheet gefunden — keine Nachricht an Jerome geschickt."
+
+    payload = json.dumps(account_data, ensure_ascii=False, indent=2)
+    persona_block = json.dumps(personas, ensure_ascii=False, indent=2)
+    prompt = (
+        "Hier ist die MARKEN-DEFINITION pro Account (Persona Summary aus dem Tracking-"
+        f"Sheet — das ist der Massstab fuer 'passt zur Marke'):\n\n{persona_block}\n\n"
+        "Hier sind Ahmads EIGENE, im Sheet bereits als KEEP bestaetigte Gewinner-Videos pro "
+        f"Luna-Vale-Account (own_winners_tracked, aus dem Google Sheet, echte Zahlen):\n\n{payload}\n\n"
+        "AUFGABE: aus JEDEM guten Winner-Video EINE konkrete Trial-Reel-VARIANTE ableiten, "
+        "kein neues Konzept erfinden. GENAU EINE Variable aendern (z.B. anderes Outfit, anderer "
+        "Ort/Setting, anderer Einstiegssatz/Hook-Wortlaut, anderer Sound) — der Rest bleibt wie "
+        "im bewaehrten Original, das ist der ganze Sinn eines Trial Reels: das Bewaehrte gezielt "
+        "variieren statt komplett neu zu raten.\n\n"
+        "Schreib daraus ZWEI Dinge, in GENAU diesem Format (zwei Abschnitte mit den "
+        "exakten Markern, sonst nichts drumherum):\n\n"
+        "===WHATSAPP===\n"
+        "EINE vollstaendige WhatsApp-Nachricht an Jerome, auf ENGLISCH (er spricht kein "
+        "Deutsch). Struktur: kurze Begruessung, dann PRO ACCOUNT (nur wenn fuer diesen "
+        "Account Winner vorhanden sind — Account komplett weglassen wenn nichts da ist) eine "
+        "kurze Ueberschrift mit dem Account-Handle. Fuer JEDE empfohlene Variante GENAU dieses "
+        "4-Punkte-Format als kompakter Block (keine langen Absaetze):\n"
+        "1. Original: kurzer Verweis auf das bewaehrte Original-Video (Link)\n"
+        "2. What to change: GENAU EINE Variable, klar benannt\n"
+        "3. Why it should still work: warum die Variation den bewaehrten Kern nicht verliert\n"
+        "4. Link: der EXAKTE Original-Link aus den Rohdaten (NIEMALS einen Link erfinden, "
+        "aendern oder auslassen)\n"
+        "Maximal 2-3 Varianten pro Account — Qualitaet vor Quantitaet. Nur der fertige "
+        "Nachrichtentext, keine Meta-Kommentare, KEINE eigene Signatur am Ende (wird "
+        "automatisch ergaenzt).\n\n"
+        "===PRODUCTION===\n"
+        "Fuer JEDE Variante aus der WhatsApp-Nachricht oben (gleiche Auswahl, gleiche "
+        "Reihenfolge) EINEN Block in GENAU diesem Format — bewusst KEIN JSON, damit "
+        "Anfuehrungszeichen in Zitaten/Hooks nichts kaputt machen:\n"
+        "---VIDEO---\n"
+        "ACCOUNT: <handle ohne @>\n"
+        "TYPE: Trial Reel\n"
+        "LINK: <der exakte Original-Link, identisch zum WhatsApp-Abschnitt>\n"
+        "HOOK: <die Kernidee/der Hook des Originals in einem Satz, Englisch>\n"
+        "OUTFIT: <konkreter Vorschlag Outfit/Setting fuer die Umsetzung, Englisch — leer "
+        "lassen (Zeile trotzdem schreiben, nur ohne Text danach) wenn nicht die geaenderte "
+        "Variable ist und aus den Rohdaten nicht klar erkennbar>\n"
+        "SOUND: <Sound/Audio-Hinweis falls aus den Rohdaten erkennbar, sonst leer>\n"
+        "INSTRUCTION: <EINE klare, direkte Anweisung an Jerome in einfachem Englisch, was "
+        "genau geaendert werden soll>\n"
+        "CAPTION: <ein vorgeschlagener finaler Caption-Text, Englisch>\n"
+        "---END---"
+    )
+    return await _compose_and_send_brief(anthropic_client, prompt, "Taeglicher Content-Brief")
+
+
+async def build_weekly_competitor_brief(anthropic_client) -> dict:
+    """Woechentliches Gegenstueck zu build_daily_content_brief -- Konkurrenz-
+    Winner + frische Hashtag-Trends statt eigener Sheet-Winner (2026-08-12,
+    Ahmad: 'vielleicht 1x pro Woche neuem Content suchen bei der Konkurrenz')."""
+    config = _load_config()
+    accounts = config.get("luna_vale_accounts", [])
+    account_data = {}
+    for account in accounts:
+        try:
+            account_data[account] = await gather_weekly_competitor_data(account, anthropic_client)
+        except Exception as e:
+            _log(f"Fehler beim Sammeln der woechentlichen Konkurrenz-Daten fuer {account} — Account uebersprungen: {e}")
+            account_data[account] = {"competitor_winners": [], "trend_posts": []}
+    return account_data
+
+
+async def send_weekly_competitor_brief(anthropic_client) -> str:
+    """Woechentliches Gegenstueck zu send_daily_content_brief. Ausdruecklich
+    als INSPIRATION gekennzeichnet, nicht als Ahmads eigene bestaetigte
+    Winner — damit in Jeromes Kopf (und im Sheet) nichts vermischt wird."""
+    account_data = await build_weekly_competitor_brief(anthropic_client)
+    personas = await _get_persona_summaries()
+
+    has_anything = any(d["competitor_winners"] or d["trend_posts"] for d in account_data.values())
+    if not has_anything:
+        _log("Keine verwertbaren Konkurrenz-/Trend-Daten gefunden, keine woechentliche Nachricht gesendet.")
+        return "ERROR: Keine verwertbaren Konkurrenz-/Trend-Daten gefunden — keine Nachricht an Jerome geschickt."
+
+    payload = json.dumps(account_data, ensure_ascii=False, indent=2)
+    persona_block = json.dumps(personas, ensure_ascii=False, indent=2)
+    prompt = (
+        "Hier ist die MARKEN-DEFINITION pro Account (Persona Summary aus dem Tracking-"
+        f"Sheet — das ist der Massstab fuer 'passt zur Marke', NICHT nur 'ist im richtigen "
+        f"Genre'):\n\n{persona_block}\n\n"
+        "Hier sind FREMDE Videos pro Luna-Vale-Account (competitor_winners = bekannte starke "
+        "Konkurrenz-Videos, trend_posts = frisch per Hashtag-Suche gefundene aktuelle Top-"
+        f"Posts) — das sind KEINE eigenen bestaetigten Winner, sondern Inspiration von "
+        f"aussen:\n\n{payload}\n\n"
+        "WICHTIG — Marken-Filter zuerst: Ahmads ausdruecklicher Wunsch ist, dass NUR "
+        "Videos empfohlen werden, die WIRKLICH zur jeweiligen Marken-Persona passen, "
+        "nicht einfach alles was im Hashtag gut performt. Ein Video kann gute Zahlen "
+        "haben und trotzdem NICHT passen — so etwas AUSSORTIEREN, auch wenn die Zahlen "
+        "verlockend sind. Priorisiere competitor_winners hoeher als generische trend_posts, "
+        "wenn beide vorhanden sind — Ahmad will dass viel auf die Konkurrenz geschaut wird. "
+        "Bevorzuge Videos mit: starkem Hook in den ersten 1-2 Sekunden, klarer "
+        "Transformation/Kontrast (z.B. soft girl -> full goth), Outfit-Wechsel/Transitions, "
+        "hoher Energie/Bewegung, dark-feminine/selbstbewusst-mysterioeser Ton (v.a. bei "
+        "lunaxvale), Comedy/Street-Interview-Punchlines, und sichtbaren US/englischsprachigen "
+        "Signalen (us_signals-Feld). SORTIERE AUS: niedrige Qualitaet/schlechte Beleuchtung "
+        "(quality-Feld), Content der nur in nicht-englischsprachigen Maerkten funktioniert, "
+        "und alles was nicht wirklich zur jeweiligen Nische passt.\n\n"
+        "Schreib daraus ZWEI Dinge, in GENAU diesem Format (zwei Abschnitte mit den "
+        "exakten Markern, sonst nichts drumherum):\n\n"
+        "===WHATSAPP===\n"
+        "EINE vollstaendige WhatsApp-Nachricht an Jerome, auf ENGLISCH (er spricht kein "
+        "Deutsch), klar als woechentliche Konkurrenz-/Trend-Inspiration eingeleitet (nicht als "
+        "Ahmads eigene Winner). Struktur: kurze Begruessung, dann PRO ACCOUNT (nur wenn fuer "
+        "diesen Account nach dem Filter wirklich passende Daten uebrig bleiben — Account "
+        "komplett weglassen wenn nichts passt) eine kurze Ueberschrift mit dem Account-Handle. "
+        "Fuer JEDES empfohlene Video GENAU dieses 4-Punkte-Format als kompakter Block:\n"
+        "1. Concept: kurze Beschreibung worum es geht\n"
+        "2. Why it fits: warum es zu diesem Account/dieser Marke passt\n"
+        "3. Key elements: was macht es funktionieren (Hook/Struktur/Text/Energie)\n"
+        "4. Link: der EXAKTE Link aus den Rohdaten (NIEMALS einen Link erfinden, aendern "
+        "oder auslassen)\n"
+        "Maximal 2-3 Videos pro Account — Qualitaet vor Quantitaet. Nur der fertige "
+        "Nachrichtentext, keine Meta-Kommentare, KEINE eigene Signatur am Ende (wird "
+        "automatisch ergaenzt).\n\n"
+        "===PRODUCTION===\n"
+        "Fuer JEDES Video aus der WhatsApp-Nachricht oben (gleiche Auswahl, gleiche "
+        "Reihenfolge) EINEN Block in GENAU diesem Format — bewusst KEIN JSON, damit "
+        "Anfuehrungszeichen in Zitaten/Hooks nichts kaputt machen:\n"
+        "---VIDEO---\n"
+        "ACCOUNT: <handle ohne @>\n"
+        "TYPE: Inspiration\n"
+        "LINK: <der exakte Link, identisch zum WhatsApp-Abschnitt>\n"
+        "HOOK: <die Kernidee/der Hook in einem Satz, Englisch>\n"
+        "OUTFIT: <konkreter Vorschlag Outfit/Setting fuer die Umsetzung, Englisch — leer "
+        "lassen (Zeile trotzdem schreiben, nur ohne Text danach) wenn aus den Rohdaten "
+        "nicht klar erkennbar>\n"
+        "SOUND: <Sound/Audio-Hinweis falls aus den Rohdaten erkennbar, sonst leer>\n"
+        "INSTRUCTION: <EINE klare, direkte Anweisung an Jerome in einfachem Englisch, was "
+        "genau zu tun ist>\n"
+        "CAPTION: <ein vorgeschlagener finaler Caption-Text, Englisch>\n"
+        "---END---"
+    )
+    return await _compose_and_send_brief(anthropic_client, prompt, "Woechentliche Konkurrenz-Inspiration")
 
 
 def _parse_brief_response(raw: str) -> tuple:
