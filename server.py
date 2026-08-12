@@ -13,7 +13,7 @@ import re
 import shutil
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
@@ -1754,6 +1754,230 @@ async def _tool_jerome_msg(args: dict) -> str:
     return await jerome_comm.compose_and_send_message(ai, args["description"].strip(), config)
 
 
+# --- Wer hat gepostet? (Ahmad vs. Jerome) ------------------------------------
+# Ahmad, 2026-08-12: er wollte wissen, ob ein Post von "gestern" von ihm oder
+# von Jerome kam. Das ist eine Frage, die ich NICHT messen kann — Instagram
+# zeigt bei einem Account, den mehrere Menschen benutzen, keine Autoren-Angabe
+# pro Beitrag, und ich habe keinen Zugriff auf Login-/Geraeteverlauf oder auf
+# private Accounts. Statt zu raten (und statt gar nichts zu koennen) sammelt
+# dieses Werkzeug genau die Belege, die wirklich vorliegen: welcher ACCOUNT
+# der Post ist, wie viele Beitraege an dem Tag messbar dazukamen, und was
+# dokumentiert/gemerkt ist — plus die klare Ansage, was davon Beweis ist und
+# was nur Absprache. Rein lesend (ein Instagram-Post-Abruf, sonst lokale
+# Dateien), deshalb bewusst KEIN Bestaetigungs-Gate.
+
+_POST_AUTHOR_DAY_WORDS = {"heute": 0, "gestern": -1, "vorgestern": -2}
+
+
+def _post_author_resolve_day(when: str):
+    """'heute'/'gestern'/'vorgestern'/'2026-08-11' -> date, sonst None (dann
+    ehrlich nachfragen statt einen falschen Tag auswerten)."""
+    text = (when or "").strip().lower()
+    today = datetime.now(ZoneInfo("Europe/Berlin")).date()
+    if text in _POST_AUTHOR_DAY_WORDS or not text:
+        return today + timedelta(days=_POST_AUTHOR_DAY_WORDS.get(text, -1))
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _post_author_parse_count(raw):
+    """Beitragszahl aus einem Snapshot ('165', '1.947') als int. None bei
+    fehlender Zahl ODER bei abgekuerzten Angaben ('1,2K', '3 Mio.') — dort
+    wuerde blindes Ziffern-Zusammenkleben eine voellig falsche Zahl liefern,
+    und eine falsche Differenz ist schlimmer als eine fehlende."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text or re.search(r"(mio|mrd|tsd|[km])\.?$", text, re.I):
+        return None
+    digits = re.sub(r"[^0-9]", "", text)
+    return int(digits) if digits else None
+
+
+def _post_author_snapshot_delta(handle: str, day):
+    """Wie viele Beitraege bei EINEM Account an `day` dazugekommen sind —
+    aus den Hintergrund-Snapshots (memory/instagram_snapshots.jsonl), also
+    echte gemessene Zahlen. Rueckgabe (delta, baseline_eintrag, tages_eintrag);
+    delta ist None, wenn es fuer den Tag keinen vergleichbaren Snapshot-Paar
+    gibt (Zeitstempel sind ISO-Text, deshalb ist der String-Vergleich hier
+    korrekt sortierend)."""
+    baseline = None   # letzter Snapshot VOR dem Tag
+    day_last = None   # letzter Snapshot AM Tag selbst
+    iso = day.isoformat()
+    try:
+        with open(instagram_tools.SNAPSHOTS_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("handle") != handle:
+                    continue
+                posts = _post_author_parse_count(entry.get("posts"))
+                if posts is None:
+                    continue
+                stamp = str(entry.get("timestamp") or "")
+                if stamp[:10] < iso:
+                    baseline = (posts, stamp)
+                elif stamp[:10] == iso:
+                    day_last = (posts, stamp)
+    except OSError:
+        return None, None, None
+    if baseline is None or day_last is None:
+        return None, baseline, day_last
+    return day_last[0] - baseline[0], baseline, day_last
+
+
+def _post_author_documented_roles() -> str:
+    """Der Rollenverteilung-Abschnitt aus claude_app_status.md, LIVE gelesen
+    statt hier hartkodiert — eine Kopie im Code waere genau die Stelle, die
+    veraltet, waehrend sich der echte Prozess aendert (Vorfall 2026-08-10)."""
+    knowledge = get_luna_vale_knowledge()
+    if not knowledge:
+        return ""
+    match = re.search(r"^## Rollenverteilung[^\n]*\n(.+?)(?=^## )", knowledge, re.S | re.M)
+    return match.group(1).strip() if match else ""
+
+
+async def _tool_post_author_check(args: dict) -> str:
+    when = (args.get("when") or "gestern").strip()
+    day = _post_author_resolve_day(when)
+    if day is None:
+        return (
+            f"ERROR: '{when}' konnte ich nicht als Tag lesen. Moeglich sind 'heute', 'gestern', "
+            "'vorgestern' oder ein Datum wie 2026-08-11."
+        )
+    people = [str(p).strip() for p in (args.get("people") or []) if str(p).strip()]
+    if len(people) < 2:
+        people = ["Ahmad", "Jerome"]
+    post_url = (args.get("post_url") or "").strip()
+    day_label = day.strftime("%d.%m.%Y")
+    who = " oder ".join(people)
+
+    lines = [f"Frage: wer von {who} hat am {day_label} gepostet."]
+
+    # Die Grenze steht bewusst GANZ OBEN, nicht als Fussnote unter den Indizien
+    # — sonst liest sich eine Sammlung von Hinweisen wie eine Antwort.
+    lines.append(
+        "GRENZE: Das kann ich nicht messen. Instagram/TikTok/Facebook zeigen bei einem Account, "
+        "den mehrere Menschen benutzen, NICHT welcher Mensch einen Beitrag hochgeladen hat — es "
+        "gibt keine Autoren-Angabe pro Post, und ich habe weder Zugriff auf den Login-/Geraete-"
+        "Verlauf der Accounts noch auf eure privaten Accounts. Alles Folgende sind Indizien, "
+        "kein Nachweis der Person."
+    )
+
+    if post_url:
+        canonical = instagram_tools.canonical_post_url(post_url)
+        if not canonical:
+            lines.append(
+                f"- Der Link '{post_url}' ist kein Instagram-Post/Reel-Link — daraus kann ich "
+                "nicht einmal den Account bestimmen."
+            )
+        else:
+            handles = config.get("luna_vale_accounts", []) + config.get("competitor_accounts", [])
+            account = None
+            try:
+                account = await instagram_tools.identify_post_account(canonical, handles, ai)
+            except Exception as e:
+                lines.append(
+                    f"- Account zum Link nicht bestimmbar, der Abruf ist fehlgeschlagen "
+                    f"({e.__class__.__name__}: {e}). Geraten wird hier nichts."
+                )
+            if account:
+                lines.append(
+                    f"- Der Post laeuft auf dem Account @{account}. Das ist der ACCOUNT, nicht die "
+                    f"Person — auf den Account koennten {who} beide zugegriffen haben."
+                )
+            elif account == "":
+                lines.append(
+                    "- Ich konnte den Link keinem der bekannten Accounts zuordnen (Instagram gibt "
+                    "den Anzeigenamen nicht her, oder der Post ist nicht mehr da)."
+                )
+
+    own_handles = config.get("luna_vale_accounts", [])
+    measured, unknown = [], []
+    for handle in own_handles:
+        delta, baseline, day_last = _post_author_snapshot_delta(handle, day)
+        if delta is None:
+            unknown.append(handle)
+        else:
+            measured.append((handle, delta, baseline[1], day_last[1]))
+    if measured:
+        lines.append("Gemessen (meine Hintergrund-Snapshots, echte Zahlen):")
+        for handle, delta, baseline_ts, day_ts in measured:
+            if delta > 0:
+                change = f"{delta} neue(r) Beitrag/Beitraege"
+            elif delta == 0:
+                change = "kein neuer Beitrag"
+            else:
+                change = f"{abs(delta)} Beitrag/Beitraege WENIGER (es wurde etwas geloescht)"
+            # Der Vergleichs-Snapshot ist der letzte VOR dem Tag — das kann auch
+            # mehrere Tage her sein (Hintergrund-Check laeuft nicht garantiert
+            # taeglich). Dann deckt die Zahl NICHT nur diesen Tag ab, und genau
+            # das muss dranstehen, sonst liest sie sich als Tageszahl.
+            span = (day - datetime.strptime(baseline_ts[:10], "%Y-%m-%d").date()).days
+            window = (
+                f"(Vergleich {baseline_ts} -> {day_ts})" if span <= 1 else
+                f"(Vergleich {baseline_ts} -> {day_ts}, also ueber {span} Tage — es gibt keinen "
+                f"Snapshot naeher am {day_label}, die Zahl ist deshalb KEINE Tageszahl)"
+            )
+            lines.append(f"- @{handle}: {change} {window}")
+    if unknown:
+        lines.append(
+            "Keine vergleichbaren Snapshots fuer diesen Tag (kein Check gelaufen oder Zahl nicht "
+            "lesbar): " + ", ".join(f"@{h}" for h in unknown) + "."
+        )
+    if not measured and not unknown:
+        lines.append(
+            "Ich habe zu dem Tag ueberhaupt keine Instagram-Snapshots — dann kann ich nicht einmal "
+            "belegen, DASS gepostet wurde."
+        )
+
+    roles = _post_author_documented_roles()
+    if roles:
+        lines.append("Dokumentierte Rollenverteilung (claude_app_status.md):")
+        lines.extend(f"  {line.strip()}" for line in roles.splitlines() if line.strip())
+        lines.append(
+            "Das ist eine Absprache, kein Beleg fuer diesen einen Post. Und: dass du ueberhaupt "
+            "fragst, ob es du oder Jerome war, passt nicht zu dieser Aufteilung — dann ist die "
+            "Notiz vermutlich veraltet und sollte korrigiert werden."
+        )
+    else:
+        lines.append(
+            "In claude_app_status.md finde ich gerade keinen Rollenverteilung-Abschnitt, auf den "
+            "ich mich stuetzen koennte."
+        )
+
+    hints = []
+    for category in ("people", "business", "decisions"):
+        for entry in memory.get_category(category).splitlines():
+            low = entry.lower()
+            if any(p.lower() in low for p in people) and re.search(
+                r"post|hochgelad|upload|ver(oe|ö)ffentlich", low
+            ):
+                hints.append(f"- [{category}] {entry.strip().lstrip('- ')}")
+    if hints:
+        lines.append("Was in meinem Langzeitgedaechtnis zum Posten steht:")
+        lines.extend(hints[:6])
+
+    lines.append(
+        f"Fazit: Ich kann nicht belegen, wer von {who} am {day_label} gepostet hat, und erfinde "
+        "dazu nichts. Wenn die Notizen oben eindeutig sind (z.B. 'nur Ahmad postet'), dann nenn das "
+        "als wahrscheinlichste Antwort MIT dem Datum der Notiz und dem Zusatz, dass es eine Notiz "
+        "und keine Messung ist. Sicher klaeren laesst sich das nur so: in der Instagram-App beim "
+        "Post selbst nachsehen (nur aussagekraeftig, wenn getrennte Zugaenge benutzt werden), Jerome "
+        "direkt fragen (jerome_msg), oder du sagst es mir — dann merke ich es mir dauerhaft (remember)."
+    )
+
+    question = f"Wer hat am {day_label} gepostet — du oder Jerome? Postet Jerome inzwischen selbst?"
+    if not memory.has_recent_question_about("gepostet", day_label):
+        memory.add_pending_question(question, urgency="medium")
+        lines.append("Ich habe die Frage vorgemerkt, damit sie nicht untergeht.")
+    return "\n".join(lines)
+
+
 # --- Batch: Rest (OpenApp / Claude Code / Fanplace / SLT.bio / Remember) ---
 
 async def _tool_open_app(args: dict) -> str:
@@ -2793,6 +3017,45 @@ TOOL_REGISTRY: dict = {
         handler=_tool_jerome_msg,
         speak_result=True,
         slow=True,
+    ),
+    "post_author_check": ToolSpec(
+        schema={
+            "name": "post_author_check",
+            "description": (
+                "Nutzen bei Fragen wie 'war der Post von gestern von mir oder von Jerome?' — also "
+                "wenn geklaert werden soll, WELCHE PERSON einen Beitrag gemacht hat. Wichtig: das "
+                "Werkzeug beantwortet die Frage NICHT, es kann sie technisch nicht beantworten "
+                "(Instagram zeigt bei gemeinsam genutzten Accounts keinen Autor pro Post, und es "
+                "gibt keinen Zugriff auf Login-Verlauf oder private Accounts). Es liefert stattdessen "
+                "die echten Belege, die vorliegen: zu welchem Account ein Link gehoert, wie viele "
+                "Beitraege an dem Tag messbar dazukamen, die dokumentierte Rollenverteilung und "
+                "gemerkte Fakten — plus wie sich die Frage wirklich klaeren laesst. NIEMALS selbst "
+                "eine Person nennen, ohne dass dieses Werkzeug oder Ahmad das hergibt."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "when": {
+                        "type": "string",
+                        "description": "Tag, um den es geht: 'heute', 'gestern', 'vorgestern' oder ein Datum wie 2026-08-11. Standard: gestern.",
+                    },
+                    "post_url": {
+                        "type": "string",
+                        "description": "Optional, Link zum konkreten Post/Reel — damit laesst sich zumindest der Account bestimmen.",
+                    },
+                    "people": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional, die zu unterscheidenden Personen. Standard: Ahmad und Jerome.",
+                    },
+                },
+                "required": [],
+            },
+        },
+        handler=_tool_post_author_check,
+        speak_result=True,
+        slow=True,
+        verbose_reply=True,
     ),
 
     # --- Batch: Rest ---

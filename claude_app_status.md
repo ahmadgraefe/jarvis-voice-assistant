@@ -24,6 +24,10 @@ Erfolgsrezept der beiden neuen Accounts: kopieren stark den Content-Stil von @go
 - **Jerome** (Mitarbeiter): erstellt und optimiert Content. Kontakt über WhatsApp.
 - **Jarvis**: Tracking, Analyse, Content-Strategie-Empfehlungen, Koordination zwischen Ahmad und Jerome. Kein Posten, keine Gerätesteuerung.
 
+**Wer hat einen bestimmten Post gemacht? (2026-08-12, nach Ahmads Frage "war der Post von gestern von mir oder von Jerome?")** — Das ist technisch NICHT feststellbar: Instagram/TikTok/Facebook zeigen bei einem Account, den mehrere Menschen benutzen, keine Autoren-Angabe pro Beitrag, und Jarvis hat weder Login-/Geräteverlauf noch Zugriff auf private Accounts von Ahmad oder Jerome. Werkzeug dafür: `post_author_check` in `server.py` — es sammelt nur die echten Belege (Account zum Post-Link, messbar dazugekommene Beiträge aus den Instagram-Snapshots, diese dokumentierte Rollenverteilung, gemerkte Fakten) und sagt ausdrücklich, dass die Person daraus nicht bewiesen ist. Niemals selbst eine Person nennen, ohne dass Ahmad das bestätigt hat.
+
+**Offene Frage dazu (Ahmad muss klären):** dass Ahmad überhaupt fragt, ob ein Post von ihm oder von Jerome war, passt nicht zur oben dokumentierten Aufteilung ("Ahmad postet, Jerome postet NICHT" — so auch im Langzeitgedächtnis, Stand 2026-08-11). Entweder postet Jerome inzwischen doch, oder die Frage war anders gemeint. Bis Ahmad das beantwortet: die Aufteilung als **möglicherweise veraltet** behandeln und nicht als Beweis für einen einzelnen Post verwenden. `post_author_check` merkt diese Frage automatisch als Pending Question vor.
+
 ## Tracking-Workbook
 
 Link: https://docs.google.com/spreadsheets/d/1VvQpaYSUF668MQjr-w7VYwiThQozXmR3zdruw5C_V08/edit — natives Google Sheet, komplett auf Englisch (Jerome spricht nur Englisch).
