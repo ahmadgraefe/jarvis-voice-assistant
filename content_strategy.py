@@ -60,9 +60,31 @@ COMPETITOR_RELEVANT_ACCOUNT = "lunaxvale"
 COMPETITOR_TOP_N = 5  # Ahmad: "er soll VIEL bei unserer Konkurrenz schauen" — weigh competitors heavily
 
 
+LUNA_VALE_STATUS_PATH = os.path.join(os.path.dirname(__file__), "claude_app_status.md")
+
+
 def _load_config():
     with open(CONFIG_PATH) as f:
         return json.load(f)
+
+
+def _get_luna_vale_knowledge() -> str:
+    """Base playbook (claude_app_status.md) PLUS whatever live-Jarvis has
+    learned mid-conversation and saved via REMEMBER (category=business) —
+    dieselbe kleine, bewusst duplizierte Hilfsfunktion wie in
+    background_brain.py/jerome_comm.py (siehe deren Docstrings), hier
+    gebraucht seit 2026-08-12 fuer die neuen Feed-Video-Ideen im taeglichen
+    Brief: die muessen auf den dokumentierten BEWAEHRTEN MUSTERN aufbauen,
+    nicht nur auf den rohen Sheet-Zahlen."""
+    try:
+        with open(LUNA_VALE_STATUS_PATH, "r", encoding="utf-8") as f:
+            base = f.read().strip()
+    except OSError:
+        base = ""
+    live_updates = memory.get_category("business")
+    if live_updates:
+        base += f"\n\n## Live von Ahmad ergaenzt (waehrend Gespraechen)\n{live_updates}"
+    return base
 
 
 def _log(msg: str):
@@ -309,10 +331,22 @@ async def send_daily_content_brief(anthropic_client) -> str:
     """The full pipeline: gather ALL data first, THEN compose ONE message,
     THEN send it ONCE. Taeglicher Pfad seit 2026-08-12 (Ahmad: 'wir arbeiten
     mit unseren Videos die funktionieren... nicht mehr nach neuem Content
-    suchen') nur noch mit den eigenen, im Sheet bestaetigten Winnern —
-    Aufgabe ist jetzt Variation statt Neuentdeckung."""
+    suchen') nur noch mit den eigenen, im Sheet bestaetigten Winnern.
+
+    Zwei Auftragsarten seit 2026-08-12 (Ahmad: 'Jerome soll auch nicht nur
+    Trials machen sondern auch fuer den normalen Feed' — 'du bzw Jarvis
+    entscheidet wie was wann gemacht werden soll'): Trial Reels (Variation
+    EINES bestehenden Winners, unveraendert) UND neue Feed Videos (neue,
+    eigenstaendige Konzepte auf einem der dokumentierten bewaehrten Muster,
+    siehe claude_app_status.md Kernregeln) — zusammen in EINER taeglichen
+    Nachricht, Mischung/Menge entscheidet Claude je Account selbst anhand
+    der echten Datenlage, genau das an Jarvis delegierte 'entscheide du'.
+    Zielgroesse ist Jeromes reale Kapazitaet von ca. 8-10 Videos PRO TAG
+    INSGESAMT ueber alle aktiven Accounts zusammen (Ahmad, 2026-08-12) —
+    NICHT pro Account, siehe claude_app_status.md Kernregeln."""
     account_data = await build_daily_content_brief()
     personas = await _get_persona_summaries()
+    knowledge = _get_luna_vale_knowledge()
 
     has_anything = any(d["own_winners_tracked"] for d in account_data.values())
     if not has_anything:
@@ -322,46 +356,70 @@ async def send_daily_content_brief(anthropic_client) -> str:
     payload = json.dumps(account_data, ensure_ascii=False, indent=2)
     persona_block = json.dumps(personas, ensure_ascii=False, indent=2)
     prompt = (
+        "Bewaehrte Business-Patterns (Kernregeln + bestaetigte starke Muster aus dem "
+        f"Tracking-Wissen — Grundlage fuer NEUE Feed-Video-Ideen unten):\n\n{knowledge[:3000]}\n\n"
         "Hier ist die MARKEN-DEFINITION pro Account (Persona Summary aus dem Tracking-"
         f"Sheet — das ist der Massstab fuer 'passt zur Marke'):\n\n{persona_block}\n\n"
         "Hier sind Ahmads EIGENE, im Sheet bereits als KEEP bestaetigte Gewinner-Videos pro "
         f"Luna-Vale-Account (own_winners_tracked, aus dem Google Sheet, echte Zahlen):\n\n{payload}\n\n"
-        "AUFGABE: aus JEDEM guten Winner-Video EINE konkrete Trial-Reel-VARIANTE ableiten, "
-        "kein neues Konzept erfinden. GENAU EINE Variable aendern (z.B. anderes Outfit, anderer "
-        "Ort/Setting, anderer Einstiegssatz/Hook-Wortlaut, anderer Sound) — der Rest bleibt wie "
-        "im bewaehrten Original, das ist der ganze Sinn eines Trial Reels: das Bewaehrte gezielt "
-        "variieren statt komplett neu zu raten.\n\n"
+        "AUFGABE — ZWEI verschiedene Auftragsarten, Zielgroesse INSGESAMT ueber ALLE Accounts "
+        "zusammen ca. 8-10 Videos pro Tag (Trial Reels + Feed Videos kombiniert) — das ist "
+        "Jeromes reale Tageskapazitaet als Editor, NICHT 8-10 pro einzelnem Account. Verteile "
+        "die 8-10 nach Datenlage: Accounts mit mehr/staerkeren bestaetigten Winnern bekommen "
+        "mehr Auftraege, schwache oder datenlose Accounts weniger oder in dem Zyklus auch mal "
+        "keinen. Lieber insgesamt unter 8-10 bleiben als Videos oder Links erfinden, die die "
+        "echten Daten nicht hergeben.\n\n"
+        "1. TRIAL REELS: aus einem guten Winner-Video EINE konkrete VARIANTE ableiten, kein "
+        "neues Konzept. GENAU EINE Variable aendern (z.B. anderes Outfit, anderer Ort/Setting, "
+        "anderer Einstiegssatz/Hook-Wortlaut, anderer Sound) — der Rest bleibt wie im bewaehrten "
+        "Original, das ist der ganze Sinn eines Trial Reels: das Bewaehrte gezielt variieren "
+        "statt komplett neu zu raten.\n\n"
+        "2. FEED VIDEOS: NEUE, eigenstaendige Videoideen fuer den normalen Feed — kein Trial "
+        "Reel eines einzelnen Videos, sondern ein komplett neues Konzept, gebaut auf einem der "
+        "oben dokumentierten BEWAEHRTEN MUSTER (z.B. Debatten-Hook, Outfit-Transition, Comedy-"
+        "auf-der-Buehne-mit-starkem-Outfit — je nachdem was fuer den Account/die Marke passt). "
+        "Nimm als Referenz das own_winners_tracked-Video, das dieses Muster am klarsten schon "
+        "bewiesen hat (fuer den LINK im Production-Block), aber die Idee selbst muss neu sein, "
+        "nicht nur eine Variable am Original geaendert.\n\n"
         "Schreib daraus ZWEI Dinge, in GENAU diesem Format (zwei Abschnitte mit den "
         "exakten Markern, sonst nichts drumherum):\n\n"
         "===WHATSAPP===\n"
         "EINE vollstaendige WhatsApp-Nachricht an Jerome, auf ENGLISCH (er spricht kein "
-        "Deutsch). Struktur: kurze Begruessung, dann PRO ACCOUNT (nur wenn fuer diesen "
-        "Account Winner vorhanden sind — Account komplett weglassen wenn nichts da ist) eine "
-        "kurze Ueberschrift mit dem Account-Handle. Fuer JEDE empfohlene Variante GENAU dieses "
-        "4-Punkte-Format als kompakter Block (keine langen Absaetze):\n"
+        "Deutsch). Struktur: kurze Begruessung, dann PRO ACCOUNT (nur wenn fuer diesen Account "
+        "ueberhaupt etwas vorhanden ist — Account komplett weglassen wenn nichts da ist) eine "
+        "kurze Ueberschrift mit dem Account-Handle, darunter GETRENNT die zwei Unterabschnitte "
+        "'Trial Reels' und 'Feed Videos' (einen Unterabschnitt weglassen wenn dafuer nichts "
+        "Passendes gefunden wurde). Fuer JEDE Trial-Reel-Empfehlung GENAU dieses 4-Punkte-"
+        "Format als kompakter Block (keine langen Absaetze):\n"
         "1. Original: kurzer Verweis auf das bewaehrte Original-Video (Link)\n"
         "2. What to change: GENAU EINE Variable, klar benannt\n"
         "3. Why it should still work: warum die Variation den bewaehrten Kern nicht verliert\n"
         "4. Link: der EXAKTE Original-Link aus den Rohdaten (NIEMALS einen Link erfinden, "
         "aendern oder auslassen)\n"
-        "Maximal 2-3 Varianten pro Account — Qualitaet vor Quantitaet. Nur der fertige "
-        "Nachrichtentext, keine Meta-Kommentare, KEINE eigene Signatur am Ende (wird "
-        "automatisch ergaenzt).\n\n"
+        "Fuer JEDE Feed-Video-Idee GENAU dieses 4-Punkte-Format:\n"
+        "1. Concept: die neue Videoidee in 1-2 Saetzen, konkret genug zum Drehen\n"
+        "2. Proven pattern: welches dokumentierte Muster das ist und warum es bei diesem "
+        "Account nachweislich funktioniert\n"
+        "3. Reference: kurzer Verweis auf das eigene KEEP-Video, das dieses Muster schon bewiesen hat\n"
+        "4. Link: der EXAKTE Link dieses Referenz-Winners aus den Rohdaten (NIEMALS erfinden)\n"
+        "Nur der fertige Nachrichtentext, keine Meta-Kommentare, KEINE eigene Signatur am Ende "
+        "(wird automatisch ergaenzt).\n\n"
         "===PRODUCTION===\n"
-        "Fuer JEDE Variante aus der WhatsApp-Nachricht oben (gleiche Auswahl, gleiche "
-        "Reihenfolge) EINEN Block in GENAU diesem Format — bewusst KEIN JSON, damit "
-        "Anfuehrungszeichen in Zitaten/Hooks nichts kaputt machen:\n"
+        "Fuer JEDEN Punkt aus der WhatsApp-Nachricht oben (Trial Reels UND Feed Videos "
+        "zusammen, gleiche Auswahl, gleiche Reihenfolge) EINEN Block in GENAU diesem Format — "
+        "bewusst KEIN JSON, damit Anfuehrungszeichen in Zitaten/Hooks nichts kaputt machen:\n"
         "---VIDEO---\n"
         "ACCOUNT: <handle ohne @>\n"
-        "TYPE: Trial Reel\n"
-        "LINK: <der exakte Original-Link, identisch zum WhatsApp-Abschnitt>\n"
-        "HOOK: <die Kernidee/der Hook des Originals in einem Satz, Englisch>\n"
+        "TYPE: Trial Reel ODER Feed Video — je nachdem was dieser Block ist\n"
+        "LINK: <der exakte Link (Original bei Trial Reel, Referenz-Winner bei Feed Video), "
+        "identisch zum WhatsApp-Abschnitt>\n"
+        "HOOK: <die Kernidee/der Hook in einem Satz, Englisch>\n"
         "OUTFIT: <konkreter Vorschlag Outfit/Setting fuer die Umsetzung, Englisch — leer "
         "lassen (Zeile trotzdem schreiben, nur ohne Text danach) wenn nicht die geaenderte "
         "Variable ist und aus den Rohdaten nicht klar erkennbar>\n"
         "SOUND: <Sound/Audio-Hinweis falls aus den Rohdaten erkennbar, sonst leer>\n"
         "INSTRUCTION: <EINE klare, direkte Anweisung an Jerome in einfachem Englisch, was "
-        "genau geaendert werden soll>\n"
+        "genau zu tun ist — bei Trial Reel: was geaendert wird, bei Feed Video: was gedreht wird>\n"
         "CAPTION: <ein vorgeschlagener finaler Caption-Text, Englisch>\n"
         "---END---"
     )
