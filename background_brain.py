@@ -71,14 +71,18 @@ INSTAGRAM_INTERVAL_SECONDS = 4 * 60 * 60      # Ahmad, 2026-08-11: 90min (16x/Ta
 # senkt gleichzeitig unnoetig haeufige automatisierte Profil-Besuche (Ban-Risiko-Reduktion).
 BUSINESS_CYCLE_INTERVAL_SECONDS = 5 * 60 * 60  # discovery/sheet-sync/video-analysis/trial-reel
 RESEARCH_INTERVAL_SECONDS = 12 * 60 * 60      # Ahmad wants 1-2 research WhatsApp updates/day, not 4-6
-SELF_IMPROVE_INTERVAL_SECONDS = 30 * 60       # Ahmad (2026-08-06): "er soll IMMER auf Fehlersuche gehen" —
-                                                # own fast dedicated cadence, decoupled from the slower
-                                                # business cycle. Cheap when idle: it's a no-op unless a
+SELF_IMPROVE_INTERVAL_SECONDS = 2 * 24 * 60 * 60  # Ahmad, 2026-08-12: Kostenreduktion, war 30min (48x/Tag) —
+                                                # jeder Tick ist zwar guenstig wenn nichts Neues anliegt (siehe
+                                                # unten), aber ein voller autonomer Claude-Code-Lauf sobald
+                                                # doch etwas gefunden wird war ein Hauptkostentreiber. Jetzt
+                                                # alle 2 Tage statt 48x/Tag. Weiterhin: no-op unless a
                                                 # genuinely NEW error line showed up since the last scan.
 
-SKILL_GROWTH_INTERVAL_SECONDS = 30 * 60        # Ahmad (2026-08-10): "ich brauche es, damit er eigenstaendiger
-                                                # wird" — reaktiver Zweig (Luecken-Scan) im selben schnellen
-                                                # Takt wie Self-Improve.
+SKILL_GROWTH_INTERVAL_SECONDS = 2 * 24 * 60 * 60  # Ahmad, 2026-08-12: Kostenreduktion, war 30min -- anders als
+                                                # Self-Improve macht dieser Zweig JEDEN Tick einen echten
+                                                # Claude-Aufruf (_find_capability_gap), nicht nur bei Bedarf --
+                                                # war darum bei 48x/Tag durchgehend teuer, nicht nur im
+                                                # Fehlerfall. Jetzt alle 2 Tage statt 30 Minuten.
 SKILL_GROWTH_IDEA_INTERVAL_SECONDS = 6 * 60 * 60  # eigener-Ideen-Zweig bewusst SELTENER als der reaktive —
                                                 # spekulativer und riskanter (Ahmads eigene Einschaetzung).
 
@@ -2305,7 +2309,7 @@ async def link_funnel_pass(config: dict):
     _save_link_funnel_snapshot(snapshot)
 
 
-TARGET_CREATOR_INTERVAL_SECONDS = 6 * 60 * 60  # multi-frame deep analysis is expensive — a few times/day is enough
+TARGET_CREATOR_INTERVAL_SECONDS = 14 * 24 * 60 * 60  # Ahmad, 2026-08-12: Kostenreduktion — war 6h, jetzt alle 2 Wochen (findet weiterhin passende Konkurrenten, nur seltener)
 TARGET_CREATOR_PER_PASS = 2  # bounded on purpose — never burn through the whole backlog in one tick
 
 
@@ -2903,11 +2907,16 @@ async def main():
 
             await _run_pass_safely("Sheet-Sync", config, sheets_sync_pass(config))
 
-            result = await _run_pass_safely(
-                "Video-Analyse", config, video_analysis_pass(config, video_rotation_index)
-            )
-            if result is not None:
-                video_rotation_index = result
+            # Video-Analyse-Pass 2026-08-12 auf Ahmads ausdruecklichen Wunsch
+            # abgeschaltet (Kostenreduktion) -- war der breiteste Vision-Kosten-
+            # treiber (bis zu 21 Accounts, bis zu 6 Bild-Frames pro Video). Fuer
+            # die eigenen Accounts ohnehin groesstenteils redundant geworden,
+            # seit instagram_insights_pass echte Zahlen ohne Vision liefert.
+            # Funktion bleibt bestehen (nicht geloescht) falls spaeter wieder
+            # gewuenscht. Nebenwirkung: deep_pattern_analysis_pass (woechentlich)
+            # liest ihre Kandidaten aus denselben, jetzt nicht mehr wachsenden
+            # video_analysis.jsonl-Daten -- laeuft weiter, findet ueber die Zeit
+            # aber weniger/keine neuen Kandidaten mehr.
 
             await _run_pass_safely("Trial-Reel-Scan", config, trial_reel_pass(config))
             await _run_pass_safely("Trial-Reel-Nachfrage", config, trial_wave_nudge_pass(config))
