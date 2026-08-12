@@ -2533,6 +2533,11 @@ async def _instagram_insights_for_account(handle: str, acc: dict) -> dict:
         err = check["error"]
         return {"ok": False, "fatal_error": err["message"] if err.get("fatal") else None, "reels_processed": 0}
 
+    await asyncio.sleep(1)  # 2026-08-12, live reproduziert: verify_token direkt gefolgt von
+    # get_recent_reels OHNE Pause schlug bei einem frisch generierten Token zuverlaessig fehl
+    # ("Invalid OAuth 2.0 Access Token"), derselbe Call isoliert (oder mit Pause) ging immer
+    # sauber durch -- sieht nach einer kurzen Meta-seitigen Propagations-/Rate-Grenze direkt
+    # nach dem Generieren eines neuen Tokens aus, kein Fehler in diesem Code.
     reels_result = await instagram_graph_api.get_recent_reels(user_id, token)
     if "error" in reels_result:
         err = reels_result["error"]
