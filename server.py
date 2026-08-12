@@ -3061,6 +3061,654 @@ async def _tool_own_action_check(args: dict) -> str:
     return "\n".join(lines)
 
 
+# --- Account-Chronik: "was ist gestern auf @X passiert?" --------------------
+# Ahmad, 2026-08-12: er wollte, dass ich mich an eine bestimmte Aktion
+# erinnere, die am Tag davor auf einem bestimmten Account passiert ist. Genau
+# das ging nicht — aus zwei sehr verschiedenen Gruenden, die vorher in einer
+# einzigen ratlosen Antwort verschwammen:
+#   1. Bei einem FREMDEN Account gibt es rueckwirkend gar nichts zu holen.
+#      Instagram und TikTok fuehren kein oeffentliches Aktivitaetsprotokoll:
+#      wer wann was geliked, gefolgt, geloescht, bearbeitet oder als Story
+#      gepostet hat, ist von aussen nicht sichtbar — heute nicht und morgen
+#      erst recht nicht mehr. Ein Werkzeug, das das "nachschlaegt", kann es
+#      nicht geben; was es geben kann, ist eine ehrliche Ansage plus die
+#      Belege, die wirklich vorliegen.
+#   2. Bei den Accounts, die ich SELBST beobachte, lag die Historie sogar
+#      lokal herum (instagram_snapshots.jsonl, video_analysis.jsonl,
+#      link_snapshots.jsonl, mein Handlungsprotokoll, das Gespraechsprotokoll,
+#      das Langzeitgedaechtnis) — nur zog sie kein Werkzeug fuer EINEN Account
+#      an EINEM Tag zusammen: post_author_check nimmt davon nur die
+#      Beitragszahl und nur fuer eigene Accounts, instagram_trend nur den
+#      allerletzten Stand, post_published_check schaut ausschliesslich live in
+#      die Gegenwart.
+# Dieses Werkzeug macht daraus eine Tages-Chronik pro Account. Und es legt bei
+# jedem Live-Blick eine Beobachtung ab (welche Beitraege waren zu diesem
+# Zeitpunkt sichtbar, seit wann sind sie online) — damit dieselbe Frage in
+# Zukunft aus eigenen Aufzeichnungen beantwortbar ist statt aus dem Nichts,
+# inklusive der Nebenwirkung, dass ein spaeter geloeschter Beitrag auffaellt.
+# Mit mode='eintragen' laesst sich zusaetzlich ein Ereignis festhalten, das
+# Ahmad mir erzaehlt ("gestern lief auf @X ein Trial Reel") — sauber als
+# berichtet markiert, nicht als gemessen.
+#
+# Nach aussen rein lesend (oeffentliche Profilseiten ansehen), lokal wird nur
+# in eine eigene Datei geschrieben — nichts davon ist fuer irgendwen sichtbar,
+# deshalb bewusst KEIN Bestaetigungs-Gate.
+
+_ACCOUNT_OBSERVATIONS_PATH = os.path.join(
+    os.path.dirname(__file__), "memory", "account_observations.jsonl"
+)
+_ACCOUNT_HISTORY_LIVE_LIMIT = 6        # neueste Beitraege, die live geholt werden
+_ACCOUNT_HISTORY_IG_TIME_LOOKUPS = 4   # Instagram: ein Seitenaufruf PRO Post noetig
+_ACCOUNT_HISTORY_MAX_LISTED = 12       # Zeilen pro Abschnitt, Rest wird gezaehlt
+_ACCOUNT_HISTORY_QUOTE_CHARS = 220     # gekappte Gespraechszitate
+
+
+def _account_history_read_jsonl(path: str) -> list:
+    """Eine JSONL-Datei als Liste von Dicts, fehlertolerant. Eine fehlende
+    Datei oder eine kaputte Zeile darf die ganze Chronik nicht abbrechen —
+    aber sie darf auch nicht dazu fuehren, dass irgendwo etwas erfunden wird:
+    was hier fehlt, taucht in der Antwort als Luecke auf."""
+    entries = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(entry, dict):
+                    entries.append(entry)
+    except OSError:
+        return []
+    return entries
+
+
+def _account_history_mentions(text, handle: str) -> bool:
+    """Erwaehnt dieser Text den Account? Bewusst simpel (Handle als Wort, mit
+    oder ohne @) — dafuer ist jede Trefferzeile fuer Ahmad nachvollziehbar."""
+    if not text or not handle:
+        return False
+    return re.search(rf"@?{re.escape(handle)}\b", str(text), re.I) is not None
+
+
+def _account_history_normalize(url: str, platform: str) -> str:
+    """Stabiler Vergleichsschluessel fuer denselben Beitrag in verschiedenen
+    URL-Formen — sonst gilt derselbe Post bei einem spaeteren Blick als 'weg'
+    und ich melde eine Loeschung, die nie stattgefunden hat."""
+    if platform == "tiktok":
+        return tiktok_tools.normalize_video_url(url)
+    return instagram_tools.normalize_video_url(url)
+
+
+def _account_history_classify(handle: str, platform: str) -> str:
+    """Beobachte ich diesen Account ueberhaupt? Das entscheidet, ob eine
+    leere Chronik 'da war nichts' oder 'ich habe nie hingesehen' heisst."""
+    low = handle.lower()
+    if platform == "tiktok":
+        own_tiktok = tiktok_tools.own_accounts()
+        if low in [a.lower() for a in own_tiktok]:
+            return (
+                "eigener TikTok-Account (config.json: tiktok_accounts). Achtung: mein regelmaessiger "
+                "Hintergrund-Check misst nur Instagram — fuer TikTok gibt es deshalb KEINE "
+                "Follower-/Beitragszahlen aus der Vergangenheit, nur was unten live steht und was "
+                "ich bei frueheren Blicken aufgezeichnet habe."
+            )
+        return (
+            "TikTok-Account, der nicht als eigener hinterlegt ist (config.json: tiktok_accounts). "
+            "Regelmaessig beobachtet wird er nicht, historische Zahlen habe ich zu ihm keine."
+        )
+    own = [str(a).strip() for a in config.get("luna_vale_accounts", []) if str(a).strip()]
+    competitors = [str(a).strip() for a in config.get("competitor_accounts", []) if str(a).strip()]
+    if low in [a.lower() for a in own]:
+        return "eigener Posting-Account (config.json: luna_vale_accounts), wird vom Hintergrund-Check regelmaessig gemessen."
+    if low in [a.lower() for a in competitors]:
+        return "getrackter Konkurrenz-Account (config.json: competitor_accounts), wird vom Hintergrund-Check regelmaessig gemessen."
+    return (
+        "fremder Account, den ich NICHT beobachte — deshalb habe ich zu ihm keine eigene Historie. "
+        "Mit add_competitor wird er ab sofort mitgemessen; rueckwirkend entsteht dadurch aber nichts."
+    )
+
+
+def _account_history_usable(entry: dict) -> bool:
+    """Traegt diese Messung ueberhaupt eine lesbare Zahl? Ein grosser Teil der
+    Snapshots steht auf null (Instagram hat die Seite nicht ausgeliefert) —
+    ohne diese Pruefung landet so ein Leer-Eintrag als Vergleichsbasis in der
+    Antwort und jede Veraenderung waere 'nicht vergleichbar', obwohl echte
+    Zahlen daneben liegen (beim ersten Testlauf genau so passiert)."""
+    return (
+        _post_author_parse_count(entry.get("followers")) is not None
+        or _post_author_parse_count(entry.get("posts")) is not None
+    )
+
+
+def _account_history_delta(baseline: dict, later: dict) -> str:
+    """Follower-/Beitrags-Veraenderung zwischen zwei Messungen. Abgekuerzte
+    Angaben ('1,2K') werden von _post_author_parse_count bewusst verworfen —
+    eine falsche Differenz waere schlimmer als eine fehlende."""
+    parts = []
+    for field, label in (("followers", "Follower"), ("posts", "Beitraege")):
+        before = _post_author_parse_count(baseline.get(field))
+        after = _post_author_parse_count(later.get(field))
+        if before is None or after is None:
+            parts.append(f"{label}: nicht vergleichbar (Zahl fehlt oder ist abgekuerzt)")
+            continue
+        diff = after - before
+        parts.append(f"{label} {before} -> {after} ({'+' if diff > 0 else ''}{diff})")
+    return ", ".join(parts)
+
+
+def _account_history_snapshot_lines(handle: str, day, platform: str) -> list:
+    """Was meine Hintergrund-Snapshots ueber diesen Account an diesem Tag
+    hergeben — echte gemessene Zahlen, kein Modell."""
+    if platform == "tiktok":
+        return [
+            "- Fuer TikTok gibt es bei mir keine Snapshot-Historie: der Hintergrund-Check misst nur "
+            "Instagram-Profile. Follower-/Videozahlen von damals kann ich deshalb nicht nachliefern."
+        ]
+    entries = [
+        e for e in _account_history_read_jsonl(instagram_tools.SNAPSHOTS_PATH)
+        if str(e.get("handle") or "").lower() == handle.lower()
+    ]
+    if not entries:
+        return [
+            "- Zu diesem Account existiert keine einzige Messung in meinen Snapshots "
+            "(memory/instagram_snapshots.jsonl). Das heisst: ich habe nie hingesehen — es heisst "
+            "NICHT, dass dort nichts passiert ist."
+        ]
+    entries.sort(key=lambda e: str(e.get("timestamp") or ""))
+    iso = day.isoformat()
+    lines = [
+        f"- Ich beobachte diesen Account seit {entries[0].get('timestamp')} "
+        f"(letzte Messung {entries[-1].get('timestamp')}, {len(entries)} Messungen insgesamt)."
+    ]
+    usable = [e for e in entries if _account_history_usable(e)]
+    if len(usable) < len(entries):
+        lines.append(
+            f"- Davon sind {len(entries) - len(usable)} Messungen leer (Instagram hat die Seite nicht "
+            "ausgeliefert) — die zaehlen unten nicht mit, weder als Zahl noch als Beleg."
+        )
+    day_entries = [e for e in usable if str(e.get("timestamp") or "")[:10] == iso]
+    before = [e for e in usable if str(e.get("timestamp") or "")[:10] < iso]
+    after = [e for e in usable if str(e.get("timestamp") or "")[:10] > iso]
+    baseline = before[-1] if before else None
+    day_last = day_entries[-1] if day_entries else None
+
+    if day_last and baseline:
+        span = (
+            datetime.strptime(str(day_last.get("timestamp"))[:10], "%Y-%m-%d").date()
+            - datetime.strptime(str(baseline.get("timestamp"))[:10], "%Y-%m-%d").date()
+        ).days
+        window = (
+            f"(Vergleich {baseline.get('timestamp')} -> {day_last.get('timestamp')})" if span <= 1 else
+            f"(Vergleich {baseline.get('timestamp')} -> {day_last.get('timestamp')}, also ueber {span} "
+            "Tage — naeher am gefragten Tag habe ich nichts gemessen, die Zahl ist deshalb KEINE Tageszahl)"
+        )
+        lines.append(f"- Gemessene Veraenderung: {_account_history_delta(baseline, day_last)} {window}")
+    elif day_last:
+        lines.append(
+            f"- Stand an dem Tag selbst ({day_last.get('timestamp')}): "
+            f"{day_last.get('followers', '?')} Follower, {day_last.get('posts', '?')} Beitraege. Eine "
+            "fruehere Messung zum Vergleichen gibt es nicht, also keine Veraenderung berechenbar."
+        )
+    elif baseline and after:
+        lines.append(
+            f"- An dem Tag selbst habe ich NICHT gemessen. Was ich sagen kann, ist das Fenster "
+            f"drumherum: {_account_history_delta(baseline, after[0])} (zwischen "
+            f"{baseline.get('timestamp')} und {after[0].get('timestamp')}) — darin steckt der "
+            "gefragte Tag mit drin, aber auch alles andere aus dem Fenster."
+        )
+    else:
+        lines.append(
+            "- An dem Tag habe ich nicht gemessen, und es gibt auch kein brauchbares Fenster "
+            "drumherum. Aus den Snapshots laesst sich zu diesem Tag also nichts belegen."
+        )
+    if len(day_entries) > 1:
+        lines.append(
+            f"- (An dem Tag gab es {len(day_entries)} Messungen; oben steht die letzte davon.)"
+        )
+    return lines
+
+
+def _account_history_group_readings(
+    entries: list, label: str, first_seen: set = None, first_seen_note: str = ""
+) -> list:
+    """Messungen desselben Beitrags zu EINER Zeile zusammenziehen: erste und
+    letzte Lesung des Tages. Der Hintergrund misst stuendlich — ungruppiert
+    stehen da 92 fast identische Zeilen fuer denselben Beitrag (erster
+    Testlauf), und die eine interessante Information, wie sich die Zahlen ueber
+    den Tag bewegt haben, geht darin unter."""
+    by_url = {}
+    for e in sorted(entries, key=lambda x: str(x.get("timestamp") or "")):
+        by_url.setdefault(str(e.get("url") or ""), []).append(e)
+
+    def _value(entry) -> str:
+        return entry.get("raw") or f"FEHLER beim Lesen ({_trial_reel_short_error(entry.get('error'))})"
+
+    lines = []
+    for url, readings in list(by_url.items())[:_ACCOUNT_HISTORY_MAX_LISTED]:
+        first, last = readings[0], readings[-1]
+        # Ein Beitrag, den ich an diesem Tag ZUM ERSTEN MAL gemessen habe,
+        # obwohl ich den Account schon vorher gemessen habe — das ist der
+        # naechstbeste Beleg dafuer, dass an dem Tag etwas dazukam. Kein
+        # Beweis: wie stark der Hinweis ist, haengt daran, wie lange die
+        # vorherige Messung her ist — genau das steht in first_seen_note.
+        marker = f" — an dem Tag ERSTMALS von mir gesehen{first_seen_note}" \
+            if first_seen and url in first_seen else ""
+        if len(readings) == 1:
+            lines.append(f"- {label} {url}: {_value(first)} (gemessen {first.get('timestamp')}){marker}")
+        else:
+            lines.append(
+                f"- {label} {url}: {first.get('timestamp')[11:16]} {_value(first)} -> "
+                f"{last.get('timestamp')[11:16]} {_value(last)} ({len(readings)} Messungen an dem Tag){marker}"
+            )
+    if len(by_url) > _ACCOUNT_HISTORY_MAX_LISTED:
+        lines.append(f"- ... und {len(by_url) - _ACCOUNT_HISTORY_MAX_LISTED} weitere Beitraege an dem Tag gemessen.")
+    return lines
+
+
+def _account_history_recorded_lines(handle: str, day) -> list:
+    """Beitrags-Messungen, die ich an genau diesem Tag zu diesem Account
+    aufgezeichnet habe (Vision-Lesungen aus dem Hintergrund, verfolgte Links)."""
+    iso = day.isoformat()
+    lines = []
+
+    all_videos = [
+        e for e in _account_history_read_jsonl(instagram_tools.VIDEO_ANALYSIS_PATH)
+        if str(e.get("handle") or "").lower() == handle.lower()
+    ]
+    videos = [e for e in all_videos if str(e.get("timestamp") or "")[:10] == iso]
+    earlier = [e for e in all_videos if str(e.get("timestamp") or "")[:10] < iso]
+    # Ohne fruehere Messungen zu dem Account waere JEDER Beitrag "erstmals
+    # gesehen" — das waere kein Hinweis, sondern nur der Startpunkt meiner
+    # Beobachtung, und genau so eine Zeile wuerde falsch gelesen.
+    known_before = {str(e.get("url") or "") for e in earlier}
+    first_seen = (
+        {str(e.get("url") or "") for e in videos} - known_before if known_before else set()
+    )
+    note = ""
+    if first_seen:
+        last_before = max(str(e.get("timestamp") or "")[:10] for e in earlier)
+        gap = (day - datetime.strptime(last_before, "%Y-%m-%d").date()).days
+        note = (
+            f" (davor habe ich den Account zuletzt am {last_before} angesehen — spricht dafuer, "
+            "dass der Beitrag an dem Tag dazukam)" if gap <= 1 else
+            f" (davor habe ich den Account zuletzt am {last_before} angesehen, also {gap} Tage vorher "
+            "— er kann genauso gut irgendwann in dieser Luecke dazugekommen sein)"
+        )
+    lines.extend(_account_history_group_readings(videos, "Beitrag", first_seen, note))
+
+    link_reads = [
+        e for e in _account_history_read_jsonl(instagram_tools.LINK_SNAPSHOTS_PATH)
+        if _account_history_mentions(e.get("url"), handle)
+        and str(e.get("timestamp") or "")[:10] == iso
+    ]
+    lines.extend(_account_history_group_readings(link_reads, "verfolgter Link"))
+
+    added = [
+        e for e in instagram_tools.get_tracked_links()
+        if _account_history_mentions(e.get("url"), handle) and str(e.get("added") or "")[:10] == iso
+    ]
+    for e in added:
+        label = f" ({e.get('label')})" if e.get("label") else ""
+        lines.append(f"- {e.get('added')} Link neu in die Verfolgung aufgenommen: {e.get('url')}{label}")
+
+    if lines:
+        lines.append(
+            "  Hinweis zur Zuordnung: Link-Messungen erkenne ich am Handle IN der URL. Ein Link der "
+            "Form instagram.com/reel/<id> ohne Handle gehoert vielleicht trotzdem zu diesem Account, "
+            "taucht hier aber nicht auf."
+        )
+    return lines
+
+
+def _account_history_observation_lines(handle: str, platform: str, day) -> list:
+    """Meine eigenen Aufzeichnungen zu diesem Account: was ich an dem Tag
+    selbst gesehen habe, und was Ahmad mir zu dem Tag erzaehlt hat."""
+    iso = day.isoformat()
+    entries = [
+        e for e in _account_history_read_jsonl(_ACCOUNT_OBSERVATIONS_PATH)
+        if str(e.get("handle") or "").lower() == handle.lower()
+        and (e.get("platform") or "instagram") == platform
+    ]
+    if not entries:
+        return [
+            "- Noch keine eigenen Aufzeichnungen zu diesem Account. Ab jetzt entstehen sie: jeder "
+            "Live-Blick unten wird mitgeschrieben, und was du mir erzaehlst, kann ich mit "
+            "mode='eintragen' festhalten."
+        ]
+    entries.sort(key=lambda e: str(e.get("timestamp") or ""))
+    lines = []
+    for e in entries:
+        stamp = str(e.get("timestamp") or "")
+        relevant_day = str(e.get("day") or stamp)[:10]
+        if relevant_day != iso:
+            continue
+        if e.get("type") == "notiz":
+            lines.append(
+                f"- {relevant_day}: {e.get('event')} (von dir berichtet am {stamp[:16]}, von mir "
+                "NICHT selbst gemessen)"
+            )
+        else:
+            posts = e.get("posts") or []
+            shown = "; ".join(
+                f"{p.get('url')}"
+                + (f" (veroeffentlicht {str(p.get('published'))[:16]})" if p.get("published") else "")
+                for p in posts[:_ACCOUNT_HISTORY_MAX_LISTED]
+            )
+            lines.append(
+                f"- {stamp}: eigener Blick aufs Profil, sichtbar waren {len(posts)} Beitraege"
+                + (f": {shown}" if shown else " (keine Links gefunden)")
+            )
+    if not lines:
+        lines.append(
+            f"- Zu diesem Tag habe ich nichts aufgezeichnet. Meine Aufzeichnungen zu dem Account "
+            f"reichen von {str(entries[0].get('timestamp'))[:16]} bis {str(entries[-1].get('timestamp'))[:16]} "
+            "— dazwischen liegen Luecken, ein leerer Tag ist deshalb kein Beleg fuer 'nichts passiert'."
+        )
+    return lines
+
+
+def _account_history_action_lines(handle: str, day) -> list:
+    """Was ICH an dem Tag mit diesem Account gemacht habe (Handlungsprotokoll,
+    dieselbe Quelle wie own_action_check)."""
+    since, until = _own_action_day_window(day)
+    entries = [
+        e for e in memory.get_action_entries(since, until)
+        if _account_history_mentions(
+            f"{e.get('action', '')} {e.get('target', '')} {e.get('detail', '')}", handle
+        )
+    ]
+    lines = []
+    for e in entries[:_ACCOUNT_HISTORY_MAX_LISTED]:
+        target = f" -> {e['target']}" if e.get("target") else ""
+        failed = "" if e.get("outcome") == "ok" else f", FEHLGESCHLAGEN ({e.get('outcome')})"
+        lines.append(f"- {e.get('timestamp')} {e.get('action')}{target}{failed}")
+    if len(entries) > _ACCOUNT_HISTORY_MAX_LISTED:
+        lines.append(f"- ... und {len(entries) - _ACCOUNT_HISTORY_MAX_LISTED} weitere eigene Handlungen zu dem Account.")
+    return lines
+
+
+def _account_history_conversation_lines(handle: str, day) -> list:
+    """Was an dem Tag im Gespraech ueber den Account gesagt wurde. Oft die
+    einzige Quelle, die eine konkrete Aktion ueberhaupt festhaelt ('ich hab
+    da gestern was gepostet') — deshalb woertlich zitiert und als Aussage,
+    nicht als Messung ausgewiesen."""
+    iso = day.isoformat()
+    entries = (
+        _account_history_read_jsonl(memory.HISTORY_PATH)
+        + _account_history_read_jsonl(memory.CONVERSATION_ARCHIVE_PATH)
+    )
+    hits = [
+        e for e in entries
+        if str(e.get("timestamp") or "")[:10] == iso and _account_history_mentions(e.get("text"), handle)
+    ]
+    hits.sort(key=lambda e: str(e.get("timestamp") or ""))
+    lines = []
+    for e in hits[:_ACCOUNT_HISTORY_MAX_LISTED]:
+        who = "Ahmad" if e.get("role") == "user" else "ich"
+        text = " ".join(str(e.get("text") or "").split())
+        if len(text) > _ACCOUNT_HISTORY_QUOTE_CHARS:
+            text = text[:_ACCOUNT_HISTORY_QUOTE_CHARS].rstrip() + " [...]"
+        lines.append(f"- {e.get('timestamp')} {who}: \"{text}\"")
+    if len(hits) > _ACCOUNT_HISTORY_MAX_LISTED:
+        lines.append(f"- ... und {len(hits) - _ACCOUNT_HISTORY_MAX_LISTED} weitere Stellen im Gespraech an dem Tag.")
+    return lines
+
+
+def _account_history_memory_lines(handle: str) -> list:
+    """Dauerhaft Gemerktes zu diesem Account — ohne Tagesbezug, deshalb
+    IMMER mit dem Datum, an dem es gemerkt wurde."""
+    hits = [e for e in memory.get_all_profile_entries() if _account_history_mentions(e.get("text"), handle)]
+    return [
+        f"- [{e.get('added')} / {e.get('category')}] {' '.join(str(e.get('text') or '').split())}"
+        for e in hits[-6:]
+    ]
+
+
+def _account_history_record(entry: dict) -> str:
+    """Beobachtung/Notiz dauerhaft ablegen. Rueckgabe: "" bei Erfolg, sonst
+    der Fehler im Klartext — eine stillschweigend verlorene Aufzeichnung
+    waere genau die Luecke, die dieses Werkzeug schliessen soll."""
+    try:
+        os.makedirs(os.path.dirname(_ACCOUNT_OBSERVATIONS_PATH), exist_ok=True)
+        with open(_ACCOUNT_OBSERVATIONS_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as e:
+        return f"{e.__class__.__name__}: {e}"
+    return ""
+
+
+def _account_history_gone_lines(handle: str, platform: str, seen: list) -> list:
+    """Beitraege, die ich frueher auf dem Profil gesehen habe und die jetzt
+    fehlen, obwohl sie NEUER sind als der aelteste gerade sichtbare Beitrag —
+    dann kann es nicht am Ausschnitt liegen, sondern sieht nach geloescht
+    oder archiviert aus. Genau das ist eine "Aktion auf dem Account", die
+    sonst spurlos verschwindet."""
+    published = [str(p.get("published")) for p in seen if p.get("published")]
+    if not published:
+        return []
+    oldest_visible = min(published)
+    current = {_account_history_normalize(str(p.get("url")), platform) for p in seen}
+    previous = [
+        e for e in _account_history_read_jsonl(_ACCOUNT_OBSERVATIONS_PATH)
+        if str(e.get("handle") or "").lower() == handle.lower()
+        and (e.get("platform") or "instagram") == platform
+        and e.get("type") != "notiz"
+    ]
+    lines, reported = [], set()
+    for observation in sorted(previous, key=lambda e: str(e.get("timestamp") or "")):
+        for post in observation.get("posts") or []:
+            url = str(post.get("url") or "")
+            when = str(post.get("published") or "")
+            key = _account_history_normalize(url, platform)
+            if not url or not when or key in current or key in reported:
+                continue
+            if when <= oldest_visible:
+                continue  # faellt nur aus dem Ausschnitt, kein Hinweis auf Loeschung
+            reported.add(key)
+            lines.append(
+                f"- {url} (veroeffentlicht {when[:16]}) habe ich am {str(observation.get('timestamp'))[:16]} "
+                "auf dem Profil gesehen, jetzt ist er nicht mehr da — obwohl er neuer ist als der "
+                "aelteste gerade sichtbare Beitrag. Sieht nach geloescht/archiviert aus; sicher weiss "
+                "ich es nicht, das sagt mir keine der beiden Plattformen."
+            )
+    return lines[:_ACCOUNT_HISTORY_MAX_LISTED]
+
+
+async def _account_history_live_lines(handle: str, platform: str, day) -> list:
+    """Live-Abgleich: was ist HEUTE auf dem Profil sichtbar, und was davon
+    wurde an dem gefragten Tag veroeffentlicht. Der Blick wird mitgeschrieben,
+    damit die naechste Frage nach 'gestern' aus Aufzeichnungen beantwortbar
+    ist statt aus dem Nichts."""
+    iso = day.isoformat()
+    lines = []
+    if platform == "tiktok":
+        recent = await tiktok_tools.get_recent_video_links(handle, limit=_ACCOUNT_HISTORY_LIVE_LIMIT)
+    else:
+        recent = await instagram_tools.get_recent_post_links(handle, limit=_ACCOUNT_HISTORY_LIVE_LIMIT)
+
+    if recent.get("error"):
+        return [
+            f"- Profil nicht gelesen ({_trial_reel_short_error(recent['error'])}) — was dort steht, "
+            "weiss ich damit NICHT. Ausdruecklich kein 'da war nichts'."
+        ]
+    if recent.get("blocked"):
+        lines.append(
+            f"- Achtung: {_trial_reel_short_error(recent['blocked'])}. Was unten steht (oder fehlt), "
+            "kann davon verfaelscht sein."
+        )
+
+    links = recent.get("links") or []
+    if not links:
+        lines.append(
+            "- Keine Beitraege gefunden. Moegliche Gruende: Profil privat/leer, die Plattform hat die "
+            "Seite anders ausgeliefert, oder es ist wirklich nichts da — welcher davon zutrifft, sehe "
+            "ich von hier aus nicht."
+        )
+        return lines
+
+    seen = []
+    for index, url in enumerate(links):
+        if platform == "tiktok":
+            when = tiktok_tools.published_at(url)   # kostenlos, aus der Video-ID
+        elif index < _ACCOUNT_HISTORY_IG_TIME_LOOKUPS:
+            when = await instagram_tools.get_post_published_at(url)
+        else:
+            when = {
+                "iso": None,
+                "error": f"Zeitpunkt nicht abgefragt (Deckel: {_ACCOUNT_HISTORY_IG_TIME_LOOKUPS} "
+                         "Instagram-Posts pro Durchlauf, jeder kostet einen Seitenaufruf)",
+            }
+        seen.append({"url": url, "published": when.get("iso") or "", "error": when.get("error") or ""})
+
+    on_day = [p for p in seen if p["published"][:10] == iso]
+    if on_day:
+        lines.append(f"- An dem Tag veroeffentlicht und heute noch online ({len(on_day)}):")
+        for p in on_day:
+            lines.append(f"  - {p['url']} — {_published_check_age(p['published'])}, {p['published'][:16]}")
+    else:
+        lines.append(
+            "- Unter den neuesten sichtbaren Beitraegen ist keiner, der an dem Tag veroeffentlicht "
+            "wurde. Das schliesst nicht aus, dass an dem Tag etwas gepostet und spaeter geloescht "
+            "wurde, oder dass es weiter unten im Profil liegt "
+            f"(angesehen wurden die neuesten {len(seen)})."
+        )
+    others = [p for p in seen if p not in on_day]
+    for p in others[:_ACCOUNT_HISTORY_MAX_LISTED]:
+        if p["published"]:
+            lines.append(f"  (sonst sichtbar: {p['url']} — {_published_check_age(p['published'])})")
+        else:
+            lines.append(f"  (sonst sichtbar: {p['url']} — Zeitpunkt unbekannt: {_trial_reel_short_error(p['error'])})")
+
+    lines.extend(_account_history_gone_lines(handle, platform, seen))
+
+    error = _account_history_record({
+        "type": "beobachtung",
+        "platform": platform,
+        "handle": handle,
+        "posts": [{"url": p["url"], "published": p["published"]} for p in seen],
+        "timestamp": datetime.now(ZoneInfo("Europe/Berlin")).strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    lines.append(
+        f"- Diesen Blick habe ich mitgeschrieben ({len(seen)} Beitraege) — ab jetzt kann ich zu diesem "
+        "Account belegen, was wann sichtbar war."
+        if not error else
+        f"- ACHTUNG: den Blick konnte ich NICHT mitschreiben ({error}) — fuer spaetere Fragen zu diesem "
+        "Tag fehlt der Beleg dann."
+    )
+    return lines
+
+
+async def _tool_account_history(args: dict) -> str:
+    handle = (args.get("handle") or "").strip().lstrip("@")
+    if not handle:
+        return (
+            "ERROR: Kein Account angegeben. Ich brauche den Handle ohne @ (z.B. lunaxvale) und "
+            "optional die Plattform ('instagram' oder 'tiktok')."
+        )
+    platform = (args.get("platform") or "instagram").strip().lower()
+    if platform not in ("instagram", "tiktok"):
+        return (
+            f"ERROR: platform='{platform}' kenne ich nicht — ich kann nur 'instagram' und 'tiktok'."
+        )
+    when = (args.get("when") or "gestern").strip()
+    day = _post_author_resolve_day(when)
+    if day is None:
+        return (
+            f"ERROR: '{when}' konnte ich nicht als Tag lesen. Moeglich sind 'heute', 'gestern', "
+            "'vorgestern' oder ein Datum wie 2026-08-11."
+        )
+    day_label = day.strftime("%d.%m.%Y")
+    mode = (args.get("mode") or "chronik").strip().lower()
+
+    if mode in ("eintragen", "merken", "notiz"):
+        event = (args.get("event") or "").strip()
+        if not event:
+            return (
+                "ERROR: Kein Ereignis angegeben (event). Zum Eintragen brauche ich in einem Satz, "
+                "was auf dem Account passiert ist — z.B. 'Trial Reel gepostet, Hook mit Outfit-Wechsel'."
+            )
+        error = _account_history_record({
+            "type": "notiz",
+            "platform": platform,
+            "handle": handle,
+            "day": day.isoformat(),
+            "event": event,
+            "source": "von Ahmad berichtet",
+            "timestamp": datetime.now(ZoneInfo("Europe/Berlin")).strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        if error:
+            return (
+                f"ERROR: Konnte das Ereignis NICHT festhalten ({error}). Bitte nochmal sagen, sobald "
+                "das behoben ist — im Moment wuerde ich es wieder vergessen."
+            )
+        return (
+            f"Festgehalten zu @{handle} ({platform}), {day_label}: {event}. Der Eintrag ist als "
+            "'von dir berichtet' markiert, nicht als selbst gemessen — so steht er auch spaeter da."
+        )
+
+    if mode not in ("chronik", "historie", "history", "nachsehen"):
+        return (
+            f"ERROR: Unbekannter Modus '{mode}'. Moeglich sind 'chronik' (nachsehen, was an einem Tag "
+            "auf dem Account passiert ist) und 'eintragen' (ein berichtetes Ereignis festhalten)."
+        )
+
+    live = args.get("live") is not False
+    lines = [f"Was am {day_label} auf @{handle} ({platform}) passiert ist — mein Kenntnisstand:"]
+
+    # Die Grenze steht bewusst GANZ OBEN: eine Liste von Fundstuecken liest
+    # sich sonst wie ein vollstaendiges Aktivitaetsprotokoll, und genau das
+    # ist es nicht und kann es nicht sein.
+    lines.append(
+        "GRENZE: Es gibt kein Aktivitaetsprotokoll eines Accounts, in das ich schauen koennte. "
+        "Instagram und TikTok zeigen von aussen NICHT, wer wann geliked, gefolgt, kommentiert, "
+        "geloescht, bearbeitet oder eine Story gepostet hat — auch nicht rueckwirkend, auch nicht "
+        "bei eigenen Accounts (Insights sieht nur, wer im Posting-Account eingeloggt ist, und dort "
+        "wird bewusst nicht eingeloggt). Alles Folgende sind MEINE eigenen Aufzeichnungen plus ein "
+        "Live-Blick — was da nicht steht, heisst 'ich habe es nicht gesehen', nie 'es ist nicht passiert'."
+    )
+    lines.append(f"Einordnung des Accounts: {_account_history_classify(handle, platform)}")
+
+    sections = [
+        ("Gemessene Zahlen (Hintergrund-Snapshots)", _account_history_snapshot_lines(handle, day, platform)),
+        ("Eigene Aufzeichnungen zu dem Tag", _account_history_observation_lines(handle, platform, day)),
+        ("An dem Tag aufgezeichnete Beitrags-Messungen", _account_history_recorded_lines(handle, day)),
+        ("Was ich selbst an dem Tag mit dem Account gemacht habe", _account_history_action_lines(handle, day)),
+        ("Was an dem Tag im Gespraech dazu gesagt wurde (Aussage, keine Messung)", _account_history_conversation_lines(handle, day)),
+        ("Dauerhaft Gemerktes zu dem Account (ohne Tagesbezug)", _account_history_memory_lines(handle)),
+    ]
+    found_any = False
+    for title, section_lines in sections:
+        if not section_lines:
+            continue
+        found_any = True
+        lines.append(f"{title}:")
+        lines.extend(section_lines)
+
+    if live:
+        lines.append("Live-Abgleich mit dem oeffentlichen Profil (Stand jetzt):")
+        lines.extend(await _account_history_live_lines(handle, platform, day))
+    else:
+        lines.append(
+            "Live-Abgleich: uebersprungen (live=false) — es steht oben also nur, was ich frueher "
+            "aufgezeichnet habe."
+        )
+
+    if not found_any:
+        lines.append(
+            "Aus meinen Aufzeichnungen kommt zu diesem Tag NICHTS — weder Messung noch Notiz noch "
+            "Gespraechsstelle."
+        )
+    lines.append(
+        "Wenn du eine bestimmte Aktion meinst, die hier nicht auftaucht: erfinden werde ich sie "
+        "nicht. Sag mir in einem Satz, was passiert ist — mit mode='eintragen' halte ich es zu "
+        "genau diesem Tag und Account fest, und ab dann erinnere ich mich daran. Fuer 'wer hat "
+        "gepostet' ist post_author_check zustaendig, fuer 'wann genau kam das raus' "
+        "post_published_check, fuer meine eigenen Handlungen own_action_check."
+    )
+    return "\n".join(lines)
+
+
 # --- Batch: Rest (OpenApp / Claude Code / Fanplace / SLT.bio / Remember) ---
 
 async def _tool_open_app(args: dict) -> str:
@@ -4331,6 +4979,73 @@ TOOL_REGISTRY: dict = {
         },
         handler=_tool_own_action_check,
         speak_result=True,
+        verbose_reply=True,
+    ),
+    "account_history": ToolSpec(
+        schema={
+            "name": "account_history",
+            "description": (
+                "Nutzen bei Fragen nach der VERGANGENHEIT EINES ACCOUNTS: 'was ist gestern auf "
+                "@lunaxvale passiert?', 'weisst du noch, was da gestern lief?', 'erinnerst du dich, "
+                "was auf dem Account gepostet wurde?', 'was hat sich bei @gothgirlenya am Montag "
+                "getan?'. Zieht fuer EINEN Account an EINEM Tag alles zusammen, was ich wirklich "
+                "weiss: gemessene Follower-/Beitragszahlen aus meinen Hintergrund-Snapshots, meine "
+                "eigenen frueheren Blicke aufs Profil, an dem Tag aufgezeichnete Beitrags-Messungen, "
+                "meine eigenen Handlungen zu dem Account, Stellen aus dem Gespraech an dem Tag, "
+                "dauerhaft Gemerktes — plus einen Live-Abgleich, welche heute sichtbaren Beitraege "
+                "an dem Tag veroeffentlicht wurden und welche frueher gesehenen inzwischen fehlen. "
+                "Jeder Live-Blick wird mitgeschrieben, die Historie waechst also mit. WICHTIG: ein "
+                "Aktivitaetsprotokoll eines Accounts gibt es NICHT — Instagram und TikTok zeigen von "
+                "aussen nie, wer wann geliked, gefolgt, kommentiert, geloescht oder eine Story "
+                "gepostet hat, auch nicht rueckwirkend und auch nicht bei eigenen Accounts. Fehlt "
+                "hier etwas, heisst das 'ich habe es nicht gesehen', NIE 'es ist nicht passiert' — "
+                "gib das genau so weiter und erfinde keine Aktion, keine Zahl und keinen Zeitpunkt, "
+                "der nicht im Ergebnis steht. Mit mode='eintragen' kann ein Ereignis festgehalten "
+                "werden, das Ahmad selbst berichtet — danach erinnere ich mich daran. Abgrenzung: "
+                "WER gepostet hat -> post_author_check, OB/WANN ein Beitrag rauskam -> "
+                "post_published_check, was ICH getan habe -> own_action_check, aktueller "
+                "Follower-Stand aller Accounts -> instagram_trend."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "handle": {
+                        "type": "string",
+                        "description": "Account ohne @ (z.B. lunaxvale), eigener oder fremder.",
+                    },
+                    "when": {
+                        "type": "string",
+                        "description": "Tag, um den es geht: 'heute', 'gestern', 'vorgestern' oder ein Datum wie 2026-08-11. Standard: gestern.",
+                    },
+                    "platform": {
+                        "type": "string",
+                        "enum": ["instagram", "tiktok"],
+                        "description": "Plattform des Accounts. Standard: instagram.",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["chronik", "eintragen"],
+                        "description": "'chronik' (Standard): nachsehen. 'eintragen': ein von Ahmad berichtetes Ereignis zu Tag + Account festhalten.",
+                    },
+                    "event": {
+                        "type": "string",
+                        "description": "Nur bei mode='eintragen': was auf dem Account passiert ist, in einem Satz.",
+                    },
+                    "live": {
+                        "type": "boolean",
+                        "description": (
+                            "Optional, Standard true: zusaetzlich live aufs oeffentliche Profil "
+                            "schauen (dauert, dafuer werden Veroeffentlichungen und verschwundene "
+                            "Beitraege erkannt). false = nur die eigenen Aufzeichnungen."
+                        ),
+                    },
+                },
+                "required": ["handle"],
+            },
+        },
+        handler=_tool_account_history,
+        speak_result=True,
+        slow=True,
         verbose_reply=True,
     ),
 
