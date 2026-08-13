@@ -8,15 +8,25 @@ call api.higgsfield.ai directly with curl. Skipping it bypasses critical
 behavior."). Muss auf jeder Maschine, die dieses Modul nutzt, installiert
 sein: `curl -fsSL https://raw.githubusercontent.com/higgsfield-ai/cli/main/install.sh | sh`.
 
-Auth laeuft NICHT ueber das interaktive `higgsfield auth login` (Browser-
-OAuth, fuer einen headless Server ungeeignet), sondern ueber die
-Umgebungsvariablen HF_API_KEY_ID/HF_API_KEY_SECRET (live verifiziert
-2026-08-13 -- das CLI akzeptiert beides gleichwertig, auch ganz ohne
-vorherigen `auth login`). Der Key MUSS aus demselben Workspace stammen wie
-das eigentliche, bezahlte Higgsfield-Konto -- ein falsch zugeordneter Key
-authentifiziert zwar, aber jeder eigentliche Aufruf schlaegt fehl ("request
-failed, no response received"), weil er zu keinem Workspace mit Guthaben
-gehoert.
+Auth laeuft NICHT ueber die Umgebungsvariablen HF_API_KEY_ID/HF_API_KEY_SECRET
+-- das sieht in der Doku nach dem richtigen headless-Weg aus, ist aber im
+CLI (Version 1.1.23, Stand 2026-08-13) nachweislich kaputt: `account status`
+und `generate create` schlagen damit reproduzierbar fehl ("request failed,
+no response received" bzw. "Not authenticated"), und zwar auf BEIDEN
+Plattformen (Mac UND Server, in sauber isolierten $HOME-Verzeichnissen
+verifiziert) -- kein Server-/DNS-/Netzwerk-Problem, ein echter CLI-Bug bei
+reinem API-Key-Login.
+
+Stattdessen: die interaktive Browser-Login-Sitzung (`higgsfield auth login`,
+einmalig auf dem Mac gemacht) einfach auf den Server kopieren --
+`~/.config/higgsfield/credentials.json` UND `~/.config/higgsfield/config.json`
+(Workspace-Auswahl). Gleiches Prinzip wie bei sheets_token.json fuer Google
+Sheets: das CLI benutzt dann ganz normal die kopierte Session, kein
+Unterschied zu einem echten `auth login` auf der Zielmaschine. Enthaelt
+einen `refresh_token`, sollte sich also selbst erneuern; falls die Session
+trotzdem irgendwann ablaeuft (Symptom: "Session expired" oder wieder "Not
+authenticated"), auf dem Mac neu `higgsfield auth login` ausfuehren und
+beide Dateien erneut auf den Server kopieren.
 
 Pipeline fuer Outfit-Transition-Videos (2026-08-13 aus der echten Job-
 Historie rekonstruiert, siehe claude_app_status.md "Higgsfield-Produktion"):
@@ -63,37 +73,30 @@ def _log(msg: str):
         pass
 
 
-def _cli_env(config: dict) -> dict:
-    """HF_API_KEY_ID/HF_API_KEY_SECRET statt `higgsfield auth login` -- siehe
-    Modul-Docstring. Fehlt einer der beiden Config-Werte, laesst diese
-    Funktion die Env-Variablen bewusst weg statt leere Strings zu setzen --
-    ein leerer HF_API_KEY_ID wuerde vom CLI anders behandelt als "gar nicht
-    gesetzt" und koennte eine bestehende `auth login`-Session am Aufrufer
-    ueberschreiben."""
-    env = dict(os.environ)
-    key = config.get("higgsfield_api_key")
-    secret = config.get("higgsfield_api_key_secret")
-    if key and secret:
-        env["HF_API_KEY_ID"] = key
-        env["HF_API_KEY_SECRET"] = secret
-    workspace = config.get("higgsfield_workspace_id")
-    if workspace:
-        env["HF_WORKSPACE_ID"] = workspace
-    return env
+HIGGSFIELD_CREDENTIALS_PATH = os.path.expanduser("~/.config/higgsfield/credentials.json")
 
 
 async def _run_cli(args: list, config: dict, timeout: int = CLI_TIMEOUT_SECONDS) -> dict:
     """Fuehrt `higgsfield <args> --json` aus, parst die JSON-Ausgabe.
     Rueckgabe immer ein dict: {"ok": True, "data": ...} oder
     {"ok": False, "error": "..."} -- Aufrufer muellen sich nie mit
-    Subprocess-/JSON-Details herum."""
-    if not config.get("higgsfield_api_key") or not config.get("higgsfield_api_key_secret"):
-        return {"ok": False, "error": "higgsfield_api_key/higgsfield_api_key_secret fehlen in config.json."}
+    Subprocess-/JSON-Details herum. `config` wird hier (noch) nicht fuer
+    Auth gebraucht -- die kommt aus der kopierten `auth login`-Sitzung, siehe
+    Modul-Docstring -- bleibt als Parameter fuer eine spaetere echte
+    API-Key-Unterstuetzung, sobald der CLI-Bug behoben ist."""
+    if not os.path.exists(HIGGSFIELD_CREDENTIALS_PATH):
+        return {
+            "ok": False,
+            "error": (
+                f"Keine Higgsfield-Login-Sitzung gefunden ({HIGGSFIELD_CREDENTIALS_PATH}). "
+                "Auf dem Mac `higgsfield auth login` ausfuehren und credentials.json + "
+                "config.json aus ~/.config/higgsfield/ hierher kopieren."
+            ),
+        }
 
     try:
         proc = await asyncio.create_subprocess_exec(
             "higgsfield", *args, "--json",
-            env=_cli_env(config),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
