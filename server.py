@@ -108,6 +108,7 @@ import sheets_tools
 import jerome_comm
 import calendar_tools
 import content_strategy
+import higgsfield_tools
 import slt_bio_tools
 import goal_tracker
 import push_notifications
@@ -3883,6 +3884,23 @@ async def _tool_server_status(args: dict) -> str:
     return "\n".join(lines)
 
 
+async def _tool_higgsfield_transition(args: dict) -> str:
+    """Kling 3.0 Motion Control -- siehe claude_app_status.md 'Higgsfield-
+    Produktion' und higgsfield_tools.py Modul-Docstring fuer die volle
+    Herleitung. Braucht einen korrekt zugeordneten, aufgeladenen API-Key in
+    config.json (higgsfield_api_key/-secret) -- solange das nicht der Fall
+    ist, meldet higgsfield_tools.generate_transition_video einen klaren
+    Fehler statt eines rohen Crashs."""
+    result = await higgsfield_tools.generate_transition_video(
+        image_ref=args["image_ref"],
+        motion_video_ref=args["motion_video_ref"],
+        mode=args.get("mode", "std"),
+    )
+    if not result.get("ok"):
+        return f"ERROR: Higgsfield-Generierung fehlgeschlagen: {result.get('error', 'unbekannter Fehler')}"
+    return f"Transition-Video fertig: {result['result_url']}"
+
+
 TOOL_REGISTRY: dict = {
     "screen": ToolSpec(
         schema={
@@ -5341,6 +5359,48 @@ TOOL_REGISTRY: dict = {
         handler=_tool_list_decisions,
         speak_result=True,
     ),
+    "higgsfield_transition": ToolSpec(
+        schema={
+            "name": "higgsfield_transition",
+            "description": (
+                "Erstellt ein Luna-Vale-Outfit-Transition-Video ueber die echte Higgsfield-"
+                "Produktionspipeline (Kling 3.0 Motion Control) -- siehe claude_app_status.md "
+                "'Higgsfield-Produktion'. Nimmt EIN Standbild von Luna im Zieloutfit "
+                "(image_ref) und EIN fremdes Bewegungsvideo als Choreo-Vorlage "
+                "(motion_video_ref) -- beide als lokaler Dateipfad, URL oder bereits "
+                "bekannte Higgsfield-Job-/Upload-ID. Nutzen wenn Ahmad ausdruecklich ein "
+                "neues Transition-Video generieren lassen will UND beide Referenzen klar "
+                "benennt oder gerade zeigt/schickt -- NICHT von dir selbst irgendeine "
+                "Referenz raten lassen, im Zweifel nachfragen welches Bild/Video gemeint "
+                "ist. Dauert ein bis mehrere Minuten. Braucht ein korrekt aufgeladenes "
+                "Higgsfield-API-Guthaben -- ein klarer Fehlertext statt eines Ergebnisses "
+                "bedeutet meist, dass das noch nicht eingerichtet ist, das dann auch so an "
+                "Ahmad weitergeben."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "image_ref": {
+                        "type": "string",
+                        "description": "Standbild von Luna im Zieloutfit: Dateipfad, URL oder Higgsfield-ID.",
+                    },
+                    "motion_video_ref": {
+                        "type": "string",
+                        "description": "Bewegungs-/Choreo-Referenzvideo: Dateipfad, URL oder Higgsfield-ID.",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["std", "pro"],
+                        "description": "std = Standard (Default), pro = teurer, hoehere Qualitaet. Nur auf 'pro' setzen wenn Ahmad das ausdruecklich will.",
+                    },
+                },
+                "required": ["image_ref", "motion_video_ref"],
+            },
+        },
+        handler=_tool_higgsfield_transition,
+        speak_result=True,
+        slow=True,
+    ),
 }
 
 TOOLS = [spec.schema for spec in TOOL_REGISTRY.values()]
@@ -5362,6 +5422,7 @@ SLOW_TOOL_FILLERS = {
     "jerome_check": "Ich schaue kurz ob Jerome geantwortet hat.",
     "jerome_brief": "Ich recherchiere das jetzt gruendlich fuer Jerome, das dauert ein paar Minuten.",
     "jerome_msg": "Ich schreibe Jerome das jetzt.",
+    "higgsfield_transition": "Ich erstelle das Transition-Video, das kann ein paar Minuten dauern.",
     "claude_code_exec": "Ich lasse das kurz von Claude Code erledigen.",
     "fanplace_snapshot": "Ich schaue kurz auf Fanplace nach.",
     "sltbio_snapshot": "Ich schaue kurz bei SLT.bio nach.",
