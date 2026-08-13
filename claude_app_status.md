@@ -70,6 +70,30 @@ Cowgirl: bester Post (Debatten-Hook "if we girls are always right then why do we
 - **Outfit-Transitions performen aktuell ebenfalls extrem stark** bei unseren eigenen Accounts — nicht mehr nur "solide Mitte" wie oben, sondern klar stark. Vorbild: wie gothgirlenya (getrackter Konkurrent) das macht — nachschauen/nachbauen. Also: Debatten-Hooks UND Outfit-Transitions sind beides aktuell starke Formate, nicht nur eines bevorzugen.
 - **Comedy-Content mit Luna "auf der Bühne"** funktioniert gut — WICHTIG dabei: sie muss ein auffaelliges, starkes Outfit tragen (z.B. richtig heisses Goth-Outfit, Daemon-Outfit) — das Outfit ist Teil davon warum es funktioniert, nicht nebensaechlich.
 - **Cowgirl: Country-Outfit** funktioniert nach demselben Muster aehnlich stark wie bei Goth.
+- **Die genaue Formel hinter den Outfit-Transitions, 2026-08-13 direkt aus mehreren live geposteten Reels rekonstruiert** (lunaxvale + cowgirllunavale, beide vor 13h gepostet, identisches Muster): Untertitel im Video "the fit switch got a lil evil, ngl" (lunaxvale) / "which version y'all liking more?" (cowgirllunavale), Caption jeweils exakt nach diesem Schema:
+  ```
+  [Alltags-Look] by day
+  [Persona-Reveal] by night
+
+  this switch hits different every time
+  [Persona-Stichwort] energy only
+  ```
+  lunaxvale: "american girl by day / maleficent by night ... dark feminine energy only". cowgirllunavale: "college girl by day / full cowgirl by night ... cowgirl energy only". Dieselbe Formel, nur das Persona-Stichwort und der Alltags-Anker ("american girl"/"college girl") wechseln je Account. Bei neuen Feed-Video-/Trial-Reel-Vorschlägen für Outfit-Transitions genau dieses Caption-Schema anbieten, nicht neu erfinden — es ist nachweislich bewährt, nicht nur eine Vermutung.
+
+## Higgsfield-Produktion (2026-08-13, aus der echten Job-Historie rekonstruiert)
+
+So entstehen die Outfit-Transition-Videos technisch (Kling 3.0 Motion Control ist mit 17 von 20 bisherigen Jobs das mit Abstand meistgenutzte Modell im Higgsfield-Account):
+
+1. **Standbild von Luna im Zieloutfit erzeugen** (z.B. über Nano Banana Pro, ein Referenzbild von Luna + Prompt für das neue Outfit).
+2. **Fremdes Bewegungsvideo als Motion-Referenz aussuchen** — eine Aufnahme einer ANDEREN echten Person (z.B. eine Cosplayerin in einem Sci-Fi-Kostüm, andere Wohnung, anderes Gesicht), die nur die Choreo/Bewegung liefert, nicht das Aussehen.
+3. **`kling3_0_motion_control`**: Standbild (`image_references`, genau 1) + Bewegungsvideo (`video_references`, genau 1) → Luna führt exakt diese Bewegung im Zieloutfit aus, in ihrem eigenen Zimmer. Kein Prompt zwingend nötig, live getestet und funktioniert sauber auch ganz ohne Prompt-Text.
+4. **Schnitt danach** (das macht Jerome/wer auch immer editiert, nicht Higgsfield selbst): der KI-Clip wird mit einem zweiten, "Alltags"-Clip zu einem Vorher/Nachher zusammengeschnitten, Untertitel eingebrannt, Caption nach der oben dokumentierten Formel geschrieben.
+
+**Für eine Konkurrenz-Transition nachbauen** (z.B. gothgirlenya): deren Video als Motion-Referenz in Schritt 2 nehmen, Lunas Bild im entsprechenden Zieloutfit als Schritt 1 — genau dieselbe Pipeline, nur die Bewegungsquelle ausgetauscht.
+
+**Soul-Character-Training (`higgsfield-soul-id`, 2026-08-12 getestet) ist NICHT der richtige Weg für Lunas Konsistenz** — zwei Tests mit `text2image_soul_v2` erzeugten zwei unterschiedliche, komplett fremde Gesichter (falsches Modell für die trainierte `--soul-cinematic`-Variante). Erst mit dem passenden Modell (`soul_cinematic`) kam ein Luna-ähnliches Ergebnis, aber die tatsächlich produktiv genutzte, bewährte Methode ist die obige Bild+Bewegungsvideo-Pipeline über `kling3_0_motion_control`, kein trainiertes Soul-Modell. Lunas `reference_id` liegt trotzdem in `config.json` (`higgsfield_luna_soul_id`) falls später doch gebraucht.
+
+**Wichtig, in eigenen Prompts/Anweisungen an Higgsfield beachten:** keine explizit sexualisierende Anweisungssprache verwenden (Ahmad, 2026-08-12/13, mehrfach bestätigt: "niemals NSFW auf Higgsfield"). In der bestehenden Job-Historie taucht wiederholt ein Prompt-Template mit sexualisierender Anweisung auf, das nicht von Jarvis stammt — das wurde Ahmad direkt gemeldet, bleibt aber seine eigene Entscheidung, nicht Jarvis' Aufgabe das zu unterbinden. Jarvis' eigene Generierungen bleiben immer non-explicit, unabhängig davon was sonst im Account passiert.
 
 ## Datenquellen
 
