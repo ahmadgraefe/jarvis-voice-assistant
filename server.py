@@ -113,6 +113,7 @@ import slt_bio_tools
 import goal_tracker
 import push_notifications
 import habit_tracker
+import context_memory
 import finance_tracker
 import flight_prices
 import proxy_tools
@@ -3901,6 +3902,26 @@ async def _tool_higgsfield_transition(args: dict) -> str:
     return f"Transition-Video fertig: {result['result_url']}"
 
 
+async def _tool_context_snapshot(args: dict) -> str:
+    return context_memory.build_snapshot(days=int(args.get("days") or 14))
+
+
+async def _tool_next_move(args: dict) -> str:
+    return await context_memory.suggest_next_action(
+        ai,
+        account=(args.get("account") or "").strip().lstrip("@"),
+        days=int(args.get("days") or 14),
+    )
+
+
+async def _tool_trend_bridge(args: dict) -> str:
+    return await context_memory.bridge_trends(
+        ai,
+        topic=(args.get("topic") or "").strip(),
+        days=int(args.get("days") or 14),
+    )
+
+
 TOOL_REGISTRY: dict = {
     "screen": ToolSpec(
         schema={
@@ -5077,6 +5098,116 @@ TOOL_REGISTRY: dict = {
             },
         },
         handler=_tool_account_history,
+        speak_result=True,
+        slow=True,
+        verbose_reply=True,
+    ),
+
+    # --- Zusammenhaengender Kontext (context_memory.py) ---
+    # Diese drei ziehen zusammen, was sonst in getrennten Ablagen liegt. Die
+    # Abgrenzung zu den Einzel-Werkzeugen steht bewusst in jeder Beschreibung:
+    # sonst greift der Hauptloop hierher, wo eine schlichte Zahl gereicht haette.
+    "context_snapshot": ToolSpec(
+        schema={
+            "name": "context_snapshot",
+            "description": (
+                "Nutzen bei Fragen nach dem GESAMTBILD zu Ahmad selbst: 'wo stehe ich gerade?', "
+                "'was weisst du ueber mich?', 'woran arbeite ich zurzeit?', 'wie arbeite ich "
+                "eigentlich?', 'was sind meine Vorlieben?'. Zieht in einem Zug zusammen: woran er "
+                "zuletzt tatsaechlich sass, sein beobachteter Arbeitsrhythmus (an wie vielen Tagen "
+                "aktiv, zu welchen Tageszeiten, staerkster Wochentag), seine Vorlieben und die Art "
+                "der Zusammenarbeit, feste Entscheidungen, die geschaeftliche Linie, Menschen im "
+                "Umfeld, laufende Ziele und Gewohnheiten sowie offene Punkte. Der Rhythmus wird aus "
+                "den Zeitpunkten unserer Gespraeche GEMESSEN, nicht geschaetzt. Abgrenzung: eine "
+                "einzelne gemerkte Tatsache -> das Langzeitgedaechtnis reicht; woran er an EINEM "
+                "bestimmten Tag sass -> screen_history; was auf einem Account los war -> "
+                "account_history. Was ich nicht aufgezeichnet habe, fehlt hier — das heisst 'nicht "
+                "gesehen', nie 'nicht passiert'."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "description": "Betrachteter Zeitraum in Tagen, Standard 14.",
+                    }
+                },
+                "required": [],
+            },
+        },
+        handler=_tool_context_snapshot,
+        speak_result=True,
+        verbose_reply=True,
+    ),
+    "next_move": ToolSpec(
+        schema={
+            "name": "next_move",
+            "description": (
+                "Nutzen wenn Ahmad fragt, WAS ER ALS NAECHSTES TUN SOLL: 'was waere jetzt sinnvoll?', "
+                "'was soll ich als naechstes machen?', 'wo soll ich ansetzen?', 'was ist der naechste "
+                "Schritt bei @cowgirllunavale?'. Wertet die Historie aller eigenen Accounts aus — "
+                "Follower-Entwicklung ueber 24 Stunden und 7 Tage, Posting-Schlagzahl, gemessene "
+                "Likes je Beitrag samt Ausreissern nach oben, wann zuletzt an dem Account gearbeitet "
+                "wurde — und leitet daraus 2 bis 3 begruendete naechste Schritte ab, jeder mit der "
+                "Zahl dahinter. Beruecksichtigt frueher getroffene Entscheidungen und laufende Ziele, "
+                "damit kein Vorschlag ihnen widerspricht. Rechnet ehrlich: eine unveraenderte "
+                "Followerzahl gilt als 'nicht messbar', nicht als Stillstand, weil Instagram ab "
+                "10.000 nur gerundet anzeigt. account leer = alle eigenen Accounts. Abgrenzung: nur "
+                "der aktuelle Follower-Stand -> instagram_trend; was an einem Tag passiert ist -> "
+                "account_history."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "account": {
+                        "type": "string",
+                        "description": "Optional ein einzelner eigener Account ohne @. Leer = alle.",
+                    },
+                    "days": {
+                        "type": "integer",
+                        "description": "Betrachteter Zeitraum in Tagen, Standard 14.",
+                    },
+                },
+                "required": [],
+            },
+        },
+        handler=_tool_next_move,
+        speak_result=True,
+        slow=True,
+        verbose_reply=True,
+    ),
+    "trend_bridge": ToolSpec(
+        schema={
+            "name": "trend_bridge",
+            "description": (
+                "Nutzen wenn Ahmad wissen will, WAS AKTUELLE TRENDS FUER SEINE ACCOUNTS BEDEUTEN: "
+                "'was bringt mir das fuer Luna Vale?', 'wie setze ich das um?', 'passt der Trend zu "
+                "meinen Accounts?', 'was mache ich mit den Konkurrenz-Erkenntnissen?'. Legt drei "
+                "Dinge nebeneinander: die zuletzt aufgenommenen Recherche-Erkenntnisse, den "
+                "gemessenen Stand samt Ausrichtung jedes eigenen Accounts, und die staerksten "
+                "zuletzt gemessenen Konkurrenz-Beitraege mit ihrer Nische. Ergebnis ist pro Account "
+                "eine Zeile: welcher Trend passt, was diese Woche konkret umsetzbar waere, und die "
+                "Zahl, auf der das fusst. Passt zu einem Account nichts oder fehlen die Daten, sagt "
+                "es das offen statt zu raten. topic engt auf ein Thema ein (z.B. 'Hooks'). "
+                "Abgrenzung: neue Recherche anstossen -> research; nur die Konkurrenzzahlen -> "
+                "instagram_trend."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "description": "Optionaler Themen-Fokus, z.B. 'Hooks' oder 'Shares'. Leer = alles Frische.",
+                    },
+                    "days": {
+                        "type": "integer",
+                        "description": "Betrachteter Zeitraum in Tagen, Standard 14.",
+                    },
+                },
+                "required": [],
+            },
+        },
+        handler=_tool_trend_bridge,
         speak_result=True,
         slow=True,
         verbose_reply=True,
