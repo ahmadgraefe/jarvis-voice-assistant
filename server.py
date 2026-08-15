@@ -1764,6 +1764,51 @@ async def _tool_jerome_check(args: dict) -> str:
     return " ".join(parts)
 
 
+async def _tool_status_update(args: dict) -> str:
+    """2026-08-15: uebernimmt was bisher morning_briefing_pass und
+    daily_summary_pass automatisch per WhatsApp schickten (Ahmad: 'Briefing
+    nur auf Anfrage, das ist besser') -- beide Passes sind jetzt abgeschaltet,
+    dieses Werkzeug liefert dieselben Infos zusammengefasst, aber nur wenn
+    Ahmad tatsaechlich danach fragt, kein eigener WhatsApp-Alarm."""
+    try:
+        fanplace_snapshot = await fanplace.get_snapshot()
+    except Exception as e:
+        fanplace_snapshot = f"ERROR: {e}"
+
+    try:
+        sltbio_snapshot = await slt_bio_tools.format_for_jarvis()
+    except Exception as e:
+        sltbio_snapshot = f"ERROR: {e}"
+
+    instagram_summary = instagram_tools.format_trend_summary()
+    knowledge_today = memory.get_knowledge(max_chars=3000)
+    open_qs = memory.get_open_questions()
+    self_improve_note = memory.format_recent_self_improve_summary(hours=24) or ""
+    skill_growth_note = memory.format_recent_skill_growth_summary(hours=24) or ""
+    open_qs_text = (
+        f"{len(open_qs)} offene Frage(n), allen voran: {open_qs[0]['question']}"
+        if open_qs else "Keine offenen Fragen."
+    )
+
+    response = await ai.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=350,
+        messages=[{
+            "role": "user",
+            "content": (
+                "Du bist Jarvis. Ahmad fragt gerade direkt nach dem aktuellen Stand der Dinge. "
+                "Gib eine KURZE Zusammenfassung (max. 5-6 Saetze) basierend auf:\n\n"
+                f"Fanplace:\n{fanplace_snapshot}\n\nSLT.bio (Link-in-Bio Klicks):\n{sltbio_snapshot}\n\n"
+                f"Instagram:\n{instagram_summary}\n\nZuletzt recherchiert:\n{knowledge_today}\n\n"
+                f"Offene Fragen: {open_qs_text}\n\n{self_improve_note}\n{skill_growth_note}\n\n"
+                "Nur das Wichtigste, keine Wiederholung von Selbstverstaendlichem. Deutsch, "
+                "Jarvis-Stil (trocken, praezise, per Sie)."
+            ),
+        }],
+    )
+    return response.content[0].text.strip()
+
+
 async def _tool_jerome_brief(args: dict) -> str:
     return await content_strategy.send_daily_content_brief(ai)
 
@@ -4764,6 +4809,21 @@ TOOL_REGISTRY: dict = {
             "input_schema": {"type": "object", "properties": {}, "required": []},
         },
         handler=_tool_jerome_check,
+        speak_result=True,
+        slow=True,
+    ),
+    "status_update": ToolSpec(
+        schema={
+            "name": "status_update",
+            "description": (
+                "Gibt eine kurze Zusammenfassung des aktuellen Stands (Fanplace, Link-in-Bio-Klicks, "
+                "Instagram-Trends, zuletzt Recherchiertes, offene Fragen). Laeuft nicht mehr automatisch "
+                "morgens/abends im Hintergrund (Ahmad, 2026-08-15: 'nur auf Anfrage'), darum ruhig nutzen "
+                "bei Fragen wie 'wie ist der Stand der Dinge', 'gib mir ein Update', 'was gibt's Neues'."
+            ),
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        handler=_tool_status_update,
         speak_result=True,
         slow=True,
     ),
