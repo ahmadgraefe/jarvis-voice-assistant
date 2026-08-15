@@ -139,6 +139,15 @@ PASS_TIMEOUT_SECONDS = 180
 
 CREDIT_ALERT_COOLDOWN_SECONDS = 6 * 3600  # one clear heads-up per ~6h while the issue persists, not every tick
 
+# Der Google-OAuth-Consent-Screen laeuft im "Testing"-Status, dadurch stirbt jedes
+# Refresh-Token 7 Tage nach seiner letzten Autorisierung (siehe claude_app_status.md).
+# Reparieren kann das NUR Ahmad (Google-Login am Mac), Jarvis kann es nur melden --
+# und genau das fehlte: der Kalender-Ausfall vom 2026-08-12 landete ausschliesslich
+# im Log und lief deshalb ~1,5 Tage unbemerkt weiter. Bewusst laenger als der
+# Credit-Cooldown (Ahmad, 2026-08-12: "brauche die Mitteilung nicht so oft") --
+# der Fix ist Handarbeit, oefter als 2x/Tag erinnern hilft niemandem.
+GOOGLE_AUTH_ALERT_COOLDOWN_SECONDS = 12 * 3600
+
 WATCHDOG_ALERT_COOLDOWN_SECONDS = 24 * 3600  # Ahmad, 2026-08-12: "brauche die Mitteilung nicht so oft" --
 # hoechstens 1x/Tag pro Pass-Label, nicht bei jedem stuendlichen Retry-Versuch erneut.
 
@@ -217,6 +226,13 @@ def _log(msg: str):
 CREDIT_ERROR_PATTERNS = ("credit balance", "insufficient_quota", "billing", "quota exceeded")
 _credit_issue_seen_at = None  # set by _exc() below whenever a matching error is formatted
 
+# Ein abgelaufenes/widerrufenes Google-Refresh-Token meldet sich immer als
+# invalid_grant aus dem jeweiligen _get_credentials() (calendar_tools/gmail_tools/
+# sheets_tools) -- der Fehlertext nennt den Dienst NICHT, welcher Zugang betroffen
+# ist steht nur in der Log-Zeile des jeweiligen Passes.
+GOOGLE_AUTH_ERROR_PATTERNS = ("invalid_grant", "token has been expired or revoked")
+_google_auth_issue_seen_at = None  # dito, gesetzt von _exc()
+
 
 def _exc(e: BaseException) -> str:
     """Several exception types (TimeoutError above all) carry NO message, so a
@@ -229,12 +245,20 @@ def _exc(e: BaseException) -> str:
     (2026-08-06, Ahmad's ask: "damit wir merken bevor es wehtut") — EVERY
     error in this file already gets formatted through here (16+ call sites),
     so this is the one place that can flag it without touching all of them.
-    Actually alerting Ahmad happens once per main-loop tick, see main()."""
-    global _credit_issue_seen_at
+    Actually alerting Ahmad happens once per main-loop tick, see main().
+
+    Dasselbe gilt seit 2026-08-14 fuer abgelaufene Google-Refresh-Token: die
+    betroffenen Passes fangen den Fehler selbst ab, loggen ihn ueber _exc() und
+    laufen weiter — _run_pass_safely sieht davon also nie etwas, und ohne diesen
+    Funnel bleibt so ein Ausfall komplett stumm (real passiert: Kalender ~1,5
+    Tage tot, ohne dass Ahmad es erfuhr)."""
+    global _credit_issue_seen_at, _google_auth_issue_seen_at
     text = str(e)
     formatted = f"{type(e).__name__}: {text}" if text else type(e).__name__
     if any(p in formatted.lower() for p in CREDIT_ERROR_PATTERNS):
         _credit_issue_seen_at = time.time()
+    if any(p in formatted.lower() for p in GOOGLE_AUTH_ERROR_PATTERNS):
+        _google_auth_issue_seen_at = time.time()
     return formatted
 
 
@@ -3180,6 +3204,29 @@ async def main():
                 )
                 _save_timer("credit_alert", now)
             _credit_issue_seen_at = None
+
+        # Abgelaufenes Google-Refresh-Token (2026-08-14) — exakt dasselbe Muster
+        # wie der Credit-Alarm darueber, aus demselben Grund: der Fehler wiederholt
+        # sich bei JEDEM Tick, bis Ahmad ihn per Hand behebt. Bewusst KEINE Ansage,
+        # welcher der drei Zugaenge betroffen ist: der invalid_grant-Text nennt den
+        # Dienst nicht, und eine geratene Zuordnung waere schlimmer als keine —
+        # welcher Pass gescheitert ist, steht wortwoertlich in der Log-Zeile.
+        global _google_auth_issue_seen_at
+        if _google_auth_issue_seen_at is not None:
+            timers_now = _load_timers()
+            if now - timers_now.get("google_auth_alert", 0) > GOOGLE_AUTH_ALERT_COOLDOWN_SECONDS:
+                await _alert(
+                    config,
+                    "⚠️ Jarvis: Ein Google-Zugang (Kalender, Gmail oder Sheets) ist abgelaufen — "
+                    "'invalid_grant', das Refresh-Token wurde widerrufen. Das kann nur du beheben: "
+                    "auf dem Mac neu autorisieren und die frische Token-Datei nach /opt/jarvis kopieren. "
+                    "Welcher der drei es ist, steht in /var/log/jarvis-brain.log. Bis dahin sind die "
+                    "Funktionen dieses Zugangs tot (z.B. Termine: keine Reminder, kein Konfliktcheck, "
+                    "nichts im Briefing). Dauerhaft weg ist das Problem erst, wenn der OAuth-Consent-"
+                    "Screen in der Google Cloud Console auf 'In Produktion' steht.",
+                )
+                _save_timer("google_auth_alert", now)
+            _google_auth_issue_seen_at = None
 
         # Roadmap Punkt 21 — sagt systemd "dieser Tick ist komplett durchgelaufen,
         # ich haenge nicht". Bleibt das aus (WatchdogSec in jarvis-brain.service),
