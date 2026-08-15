@@ -3010,9 +3010,11 @@ async def main():
             last_meeting_reminder = now
             _save_timer("meeting_reminder", now)
 
-        # Eigener Takt, siehe SCREEN_AWARENESS_INTERVAL_SECONDS oben —
-        # niedrigfrequent, rein passiv, Roadmap Punkt 19.
-        if now - last_screen_awareness >= SCREEN_AWARENESS_INTERVAL_SECONDS:
+        # Abgeschaltet (Ahmad, 2026-08-15): unbedingter Vision-Call alle 25 Min,
+        # unabhaengig davon ob etwas Interessantes passiert ist, zu teuer fuer den
+        # Nutzen. screen_awareness_pass bleibt als Funktion erhalten falls spaeter
+        # wieder gebraucht, siehe SCREEN_AWARENESS_INTERVAL_SECONDS oben.
+        if False and now - last_screen_awareness >= SCREEN_AWARENESS_INTERVAL_SECONDS:
             await _run_pass_safely("Screen-Awareness", config, screen_awareness_pass(config))
             last_screen_awareness = now
             _save_timer("screen_awareness", now)
@@ -3073,10 +3075,10 @@ async def main():
         await _run_pass_safely("Konkurrenz-Scan (woechentlich)", config, competitor_content_scan_pass(config), timeout=600)
         await _run_pass_safely("Instagram-Insights", config, instagram_insights_pass(config), timeout=300)
 
-        # Recherche laeuft bewusst auf ihrem EIGENEN, langsameren Takt (1-2x/Tag,
-        # Ahmads Wunsch) — losgeloest vom Business-Zyklus unten, der geschaefts-
-        # kritische Dinge (virale Videos, Jerome-Trial-Reels) weiter zuegig macht.
-        if now - last_research >= RESEARCH_INTERVAL_SECONDS:
+        # Abgeschaltet (Ahmad, 2026-08-15): die WhatsApp-Recherche-Updates zu
+        # Social-Media-Trends wurden nicht gebraucht. research_pass bleibt als
+        # Funktion erhalten falls spaeter wieder gebraucht.
+        if False and now - last_research >= RESEARCH_INTERVAL_SECONDS:
             await _run_pass_safely("Recherche", config, research_pass(config))
             last_research = now
             _save_timer("research", now)
