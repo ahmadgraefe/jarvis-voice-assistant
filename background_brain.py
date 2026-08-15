@@ -91,8 +91,9 @@ CALENDAR_CHECK_INTERVAL_SECONDS = 3 * 60 * 60  # Terminkonflikte sind selten, ab
 # zeitkritisch genug fuer mehr als den 6h-Business-Takt. Aendert NICHTS am
 # Kalender, meldet nur (Tier 1 Punkt 7, 2026-08-08, Ahmads bewusste Wahl).
 
-GMAIL_REPLY_INTERVAL_SECONDS = 30 * 60  # aehnlich haeufig wie der Jerome-Kanal,
-# aber E-Mail ist typischerweise nicht dringender als das.
+GMAIL_REPLY_INTERVAL_SECONDS = 24 * 60 * 60  # Ahmad, 2026-08-15: von alle 30 Min
+# auf 1x/Tag runtergedreht ("soll gerne 1x pro Tag die Mails checken und
+# Entwuerfe schreiben, ich schick es ab") — verschickt weiterhin nie selbst.
 
 MEETING_REMINDER_INTERVAL_SECONDS = 5 * 60  # eigener schneller Takt, keine
 # Arbeitszeit-Gate (Termine koennen jederzeit sein), Tier 3 Punkt 14, 2026-08-08.
@@ -104,11 +105,15 @@ SCREEN_AWARENESS_INTERVAL_SECONDS = 25 * 60  # Roadmap Punkt 19, 2026-08-09 —
 # als auch fuer die Kosten. Bewusst KEIN _alert() dabei, rein passiv/ambient
 # — ein Alarm bei jedem Zyklus waere aufdringlich, nicht was Ahmad wollte.
 
-FINANCE_SYNC_INTERVAL_SECONDS = 6 * 60 * 60  # Tier 3 Punkt 15, 2026-08-08 —
-# Kurs+Payouts muessen nicht minuetlich aktuell sein, alle 6h reicht locker.
+FINANCE_SYNC_INTERVAL_SECONDS = 60 * 60  # Ahmad, 2026-08-15: der Pass selbst
+# laesst nur noch montags (Auszahlungstag) wirklich etwas passieren (siehe
+# Wochen-Gate in finance_sync_pass), dieser Takt hier ist nur ein stuendlicher
+# Retry-Check, damit ein verpasster Montag (Server down o.ae.) nicht die
+# ganze Woche kostet -- war vorher 6h.
 
-GOAL_CHECK_INTERVAL_SECONDS = 6 * 60 * 60  # der Pass selbst tickt alle 6h — die
-# eigentliche Faelligkeit steuert jedes Ziel selbst ueber sein eigenes
+GOAL_CHECK_INTERVAL_SECONDS = 24 * 60 * 60  # Ahmad, 2026-08-15: von 6h auf
+# 1x/Tag runtergedreht ("alle 1-2 Tage reicht") — die eigentliche
+# Faelligkeit steuert weiterhin jedes Ziel selbst ueber sein eigenes
 # check_in_days (Tier 1 Punkt 8, 2026-08-08).
 
 MEMORY_CONSOLIDATION_INTERVAL_SECONDS = 24 * 60 * 60  # Tier 2 Punkt 11 ("Dreaming"),
@@ -2032,7 +2037,20 @@ async def finance_sync_pass(config: dict):
     Fanplace-Payout-Historie, und ein zurueckhaltender Trend-Check.
     Rechnungs-Erkennung aus E-Mails laeuft separat in gmail_reply_pass
     (eigener, schnellerer Takt, dort passiert es im selben Abwasch wie die
-    ohnehin schon laufende Klassifikation)."""
+    ohnehin schon laufende Klassifikation).
+
+    Ahmad, 2026-08-15: 'reicht wenn er alle Rechnungen und Zahlen jeden
+    Montag einmal checkt, weil wir jeden Montag auch Auszahlung bekommen' —
+    nur noch montags, und per Timer dedupliziert, damit der stuendliche
+    Retry-Takt oben (FINANCE_SYNC_INTERVAL_SECONDS) nicht denselben Montag
+    24x durchlaeuft."""
+    if datetime.now().weekday() != 0:  # 0 = Montag
+        return
+    timers = _load_timers()
+    if time.time() - timers.get("finance_sync_done", 0) < 6 * 24 * 60 * 60:
+        return
+    _save_timer("finance_sync_done", time.time())
+
     try:
         rate = await finance_tracker.fetch_usd_eur_rate()
         await finance_tracker.update_fx_rate(rate)
@@ -2996,16 +3014,16 @@ async def main():
             last_link_funnel = now
             _save_timer("link_funnel", now)
 
-        # Eigener Takt, siehe CALENDAR_CHECK_INTERVAL_SECONDS oben — aendert
-        # nichts am Kalender, meldet nur echte Ueberschneidungen.
-        if now - last_calendar_check >= CALENDAR_CHECK_INTERVAL_SECONDS:
+        # Abgeschaltet (Ahmad, 2026-08-15): "in meinem Kalender wird nie was
+        # Wichtiges stehen, deshalb keine Konflikte" -- calendar_conflict_pass
+        # und meeting_reminder_pass bleiben als Funktionen bestehen falls
+        # spaeter doch wieder gebraucht.
+        if False and now - last_calendar_check >= CALENDAR_CHECK_INTERVAL_SECONDS:
             await _run_pass_safely("Kalender-Konfliktcheck", config, calendar_conflict_pass(config))
             last_calendar_check = now
             _save_timer("calendar_check", now)
 
-        # Eigener schneller Takt, siehe MEETING_REMINDER_INTERVAL_SECONDS oben —
-        # zeitkritisch, keine Arbeitszeit-Gate, aendert nichts am Kalender.
-        if now - last_meeting_reminder >= MEETING_REMINDER_INTERVAL_SECONDS:
+        if False and now - last_meeting_reminder >= MEETING_REMINDER_INTERVAL_SECONDS:
             await _run_pass_safely("Meeting-Reminder", config, meeting_reminder_pass(config))
             last_meeting_reminder = now
             _save_timer("meeting_reminder", now)
@@ -3061,8 +3079,14 @@ async def main():
         # als Funktion bestehen falls spaeter (z.B. Ahmads geplante WhatsApp-
         # Webhook-API) doch wieder ein automatischer Trigger gewuenscht ist.
 
-        await _run_pass_safely("Tages-Zusammenfassung", config, daily_summary_pass(config))
-        await _run_pass_safely("Morgen-Briefing", config, morning_briefing_pass(config))
+        # Abgeschaltet (Ahmad, 2026-08-15): "Briefing nur auf Anfrage, das ist
+        # besser" -- dieselbe Zusammenfassung gibt es jetzt live ueber das
+        # status_update-Werkzeug in server.py. daily_summary_pass/
+        # morning_briefing_pass bleiben als Funktionen bestehen falls spaeter
+        # doch wieder ein automatischer Trigger gewuenscht ist.
+
+        # await _run_pass_safely("Tages-Zusammenfassung", config, daily_summary_pass(config))
+        # await _run_pass_safely("Morgen-Briefing", config, morning_briefing_pass(config))
         # 2026-08-12: Ahmad meldete live wiederholte "hat nicht reagiert"-Alarme.
         # Kein echter Haenger -- build_daily_content_brief scannt inzwischen 5
         # statt 3 Accounts (lunas.crypt/succubuslunavale kamen dazu), jeweils
